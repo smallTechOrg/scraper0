@@ -1,12 +1,15 @@
-# .gitignore
 __pycache__/
 .pytest_cache/
-
-# Environments
+.ruff_cache/
+.venv/
 venv/
-
-bbmp_auth.json
-captcha.png
-
 .env
+.env.*
+!.env.example
 .claude/
+# local SQLite database, local Fernet key, learned recipes
+data/
+# frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
