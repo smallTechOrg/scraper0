@@ -20,12 +20,12 @@ from sqlalchemy import delete, select, update
 
 from scraper0.config import get_settings
 from scraper0.core.crypto import decrypt, encrypt
-from scraper0.db.models import Job, JobEvent, JobFile, now
+from scraper0.db.models import Job, JobEvent, JobFile, new_id, now
 from scraper0.db.session import session_scope
 
 log = structlog.get_logger(__name__)
 TERMINAL = {"succeeded", "failed", "cancelled"}
-KINDS = {"crawl", "connector", "ingest"}
+KINDS = {"crawl", "connector", "ingest", "site_refresh", "site_learn", "site_write"}
 STALE_AFTER = timedelta(minutes=10)
 
 _pool: ThreadPoolExecutor | None = None
@@ -59,16 +59,25 @@ def submit(tenant_id: str, kind: str, input: dict, source_id: str | None = None,
         raise JobInputError(f"kind must be one of {sorted(KINDS)}")
     input = dict(input or {})
     _validate(kind, input, files)
-    auth = input.pop("auth", None)
-    if auth:
-        input["auth_enc"] = encrypt(json.dumps(auth))      # portal passwords never stored in clear
     with session_scope() as s:
-        j = Job(tenant_id=tenant_id, kind=kind, input=input, source_id=source_id, progress={"message": "queued"})
-        s.add(j)
-        s.flush()
+        j = add_job(s, tenant_id, kind, input, source_id)
         for name, data in files or []:
             s.add(JobFile(job_id=j.id, filename=name[:300], data=data))
         return j.id
+
+
+def add_job(s, tenant_id: str, kind: str, input: dict, source_id: str | None = None, job_id: str | None = None) -> Job:
+    """Add a queued job inside the caller's session (so it can commit atomically with other rows).
+    `input["auth"]` is encrypted; the caller dispatches the job after committing."""
+    input = dict(input or {})
+    auth = input.pop("auth", None)
+    if auth:
+        input["auth_enc"] = encrypt(json.dumps(auth))      # portal passwords never stored in clear
+    j = Job(id=job_id or new_id(), tenant_id=tenant_id, kind=kind, input=input, source_id=source_id,
+            progress={"message": "queued"})
+    s.add(j)
+    s.flush()
+    return j
 
 
 def _validate(kind: str, inp: dict, files) -> None:

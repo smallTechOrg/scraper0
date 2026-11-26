@@ -55,6 +55,8 @@ def seed() -> None:
         if slug and s.scalar(select(Tenant).where(Tenant.slug == slug)) is None:
             s.add(Tenant(slug=slug, name=slug, monthly_ai_budget_usd=50.0))
             log.info("bootstrap_tenant_created", slug=slug)
+    from scraper0.services.sites import seed_code_actions
+    seed_code_actions()          # v2: connector actions as locked version 1
 
 
 def startup() -> None:

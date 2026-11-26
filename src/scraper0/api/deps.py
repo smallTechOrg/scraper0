@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from sqlalchemy import select
+
 from scraper0.config import get_settings
 from scraper0.db.models import Membership, Tenant, User
 from scraper0.db.session import session_scope
@@ -18,12 +20,12 @@ CSRF_VALUE = "scraper0"
 
 
 class APIError(Exception):
-    def __init__(self, status: int, code: str, message: str):
-        self.status, self.code, self.message = status, code, message
+    def __init__(self, status: int, code: str, message: str, extra: dict | None = None):
+        self.status, self.code, self.message, self.extra = status, code, message, extra or {}
 
 
-def error_response(status: int, code: str, message: str) -> JSONResponse:
-    return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
+def error_response(status: int, code: str, message: str, extra: dict | None = None) -> JSONResponse:
+    return JSONResponse({"error": {"code": code, "message": message, **(extra or {})}}, status_code=status)
 
 
 @dataclass
@@ -92,7 +94,7 @@ def resolve(request: Request, *, need_tenant: bool = True) -> Principal:
             if wanted:
                 chosen = next(((t, r) for t, r in tenants if t.id == wanted or t.slug == wanted), None)
                 if chosen is None and u.is_platform_admin:
-                    t = s.get(Tenant, wanted)
+                    t = s.get(Tenant, wanted) or s.scalar(select(Tenant).where(Tenant.slug == wanted))
                     chosen = (t, "admin") if t else None
                 if chosen is None:
                     raise APIError(403, "not_a_member", "you are not a member of that tenant")

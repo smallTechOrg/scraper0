@@ -3,7 +3,7 @@
 #   docker build --build-arg SCRAPER0_API_URL=https://api.example.com -t scraper0-frontend .
 #   docker run -p 8080:8080 scraper0-frontend
 #
-# SCRAPER0_API_URL is needed at BUILD time: Next.js compiles the /v1 and /api
+# SCRAPER0_API_URL is needed at BUILD time: Next.js compiles the /v1, /v2 and /api
 # rewrites into the standalone server.
 
 FROM node:22.16.0-alpine AS deps

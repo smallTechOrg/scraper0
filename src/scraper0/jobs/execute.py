@@ -55,6 +55,9 @@ def run(job_id: str, tenant_id: str, kind: str, inp: dict, source_id: str | None
             out = _connector(tenant_id, inp, source_id, rep, ai)
         elif kind == "ingest":
             out = _ingest(job_id, tenant_id, inp, source_id, rep, ai)
+        elif kind in ("site_refresh", "site_learn", "site_write"):
+            from scraper0.services import site_runs
+            out = site_runs.run(job_id, tenant_id, kind, inp, rep, ai)
         else:
             raise JobFailed(f"unknown job kind {kind}")
     except Cancelled as e:

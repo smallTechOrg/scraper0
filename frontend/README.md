@@ -4,7 +4,7 @@ Next.js 15 (App Router) + React 19 + TypeScript + Tailwind CSS 4. It contains th
 
 ## How it talks to the API
 
-The browser only ever calls this Next.js server. `next.config.ts` rewrites `/v1/*` and `/api/*` to `SCRAPER0_API_URL`, so the `s0_session` cookie is first-party and no CORS is needed. All requests go through `lib/api.ts`. That client:
+The browser only ever calls this Next.js server. `next.config.ts` rewrites `/v1/*`, `/v2/*` and `/api/*` to `SCRAPER0_API_URL`, so the `s0_session` cookie is first-party and no CORS is needed. All requests go through `lib/api.ts`. That client:
 
 - sends `credentials: "include"`, `X-Requested-With: scraper0` (the CSRF guard), and `X-Tenant: <selected tenant id>`. The selected tenant is stored in `localStorage` under `s0_tenant` and switched from the header.
 - turns `{"error": {"code", "message"}}` bodies into thrown `ApiError`s.

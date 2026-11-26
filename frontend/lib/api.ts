@@ -1,5 +1,5 @@
 /**
- * Typed client for the scraper0 HTTP API (spec/api.md, v0.1).
+ * Typed client for the scraper0 HTTP API (spec/api.md v1, spec/api-v2.md v2).
  *
  * The browser calls same-origin /v1/* which Next.js rewrites to the API, so the
  * s0_session cookie is first-party. Every request sends credentials, the CSRF
@@ -336,6 +336,150 @@ export interface AdminUsage {
 }
 
 // ---------------------------------------------------------------------------
+// v2: sites and actions (spec/api-v2.md)
+// ---------------------------------------------------------------------------
+
+export type ActionKind = "read" | "write";
+export type ActionImplementation = "learned" | "code";
+export type ActionStatus = "draft" | "locked" | "broken";
+export type VersionStatus = "draft" | "locked" | "retired" | "broken";
+
+/** JSON Schema objects; rendered as JSON, never interpreted beyond a peek at `properties`. */
+export type JsonSchema = Record<string, unknown>;
+
+export interface ActionSummary {
+  name: string;
+  kind: ActionKind;
+  status: ActionStatus;
+}
+
+export interface SiteSummary {
+  site_id: string;
+  base_url: string;
+  name: string;
+  actions: ActionSummary[];
+}
+
+export interface Action {
+  site_id: string;
+  name: string;
+  kind: ActionKind;
+  /** Code actions such as lookups and writes may have no entity. */
+  entity: string | null;
+  implementation: ActionImplementation;
+  seed_urls: string[];
+  status: ActionStatus;
+  locked_version: number | null;
+  input_schema: JsonSchema | null;
+  output_schema: JsonSchema | null;
+  last_success_at: ISODate | null;
+  last_failure_at: ISODate | null;
+  consecutive_failures: number;
+}
+
+export interface Site extends Omit<SiteSummary, "actions"> {
+  created_at: ISODate;
+  created_by_tenant: string | null;
+  actions: Action[];
+}
+
+export interface VersionPreview {
+  /** First 20 items. Either bare entity data or stored items ({id, updated_at, data}). */
+  items: Array<Record<string, unknown>>;
+  count: number;
+  checked_at: ISODate | null;
+}
+
+export interface ActionVersion {
+  version: number;
+  status: VersionStatus;
+  created_at: ISODate;
+  locked_at: ISODate | null;
+  locked_by: string | null;
+  preview: VersionPreview | null;
+  implementation_snapshot: Record<string, unknown> | null;
+}
+
+export interface ActionContract {
+  site_id: string;
+  action: string;
+  kind: ActionKind;
+  version: number;
+  input_schema: JsonSchema | null;
+  output_schema: JsonSchema | null;
+  endpoint: string;
+  curl: string;
+}
+
+export interface ActionCreate {
+  name: string;
+  kind: ActionKind;
+  entity: string;
+  seed_urls?: string[];
+}
+
+export interface LearnStarted {
+  job_id: string;
+  version: number;
+}
+
+export interface ReadOptions {
+  event_filter?: string;
+  category_filter?: string;
+  categories?: string[];
+  include_online?: boolean;
+  /** YYYY-MM-DD; default today (Asia/Kolkata). */
+  from?: string;
+}
+
+export interface ReadRequest {
+  options?: ReadOptions;
+  freshness_hours?: number;
+  timeout_s?: number;
+}
+
+export interface ReadItem {
+  id: string;
+  updated_at: ISODate;
+  data: Record<string, unknown>;
+}
+
+export interface ReadResult {
+  site_id: string;
+  action: string;
+  version: number;
+  items: ReadItem[];
+  complete: boolean;
+  scraped_at: ISODate | null;
+  refresh_job_id: string | null;
+  health: "ok" | "broken";
+  /** Set when the AI filter could not run (nothing was filtered out). */
+  ai_error?: string | null;
+}
+
+export interface LookupRequest {
+  input: Record<string, unknown>;
+  auth?: Record<string, unknown>;
+  timeout_s?: number;
+}
+
+/** 200 → output; 202 (timed out) → only job_id. */
+export type LookupResult =
+  | { site_id: string; action: string; version: number; output: unknown }
+  | { job_id: string };
+
+export interface WriteRequest {
+  input: Record<string, unknown>;
+  auth?: Record<string, unknown>;
+  force?: boolean;
+  timeout_s?: number;
+}
+
+export type WriteResult =
+  | { status: "succeeded"; output: unknown; idempotency_key: string; job_id: string; replayed: boolean }
+  | { status: "running"; idempotency_key: string; job_id: string };
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
@@ -368,6 +512,30 @@ const STATUS_TEXT: Record<number, string> = {
   429: "Too many requests. Try again later.",
   502: "The upstream service failed.",
 };
+
+
+/** Friendly wording for the v2 error codes (spec/api-v2.md). */
+const V2_MESSAGES: Record<string, (serverMessage: string) => string> = {
+  site_not_onboarded: () => "This site hasn't been onboarded yet. Onboard it from the Sites page first.",
+  action_not_available: () =>
+    "This action has no locked version yet. Learn it, check the preview and lock a version first.",
+  action_exists: () => "This site already has an action with that name. Use the existing one or pick another name.",
+  invalid_input: (m) => `Some of the input is invalid${m ? `: ${m}` : "."}`,
+  action_failed: (m) => `The action failed on the site${m ? `: ${m}` : "."}`,
+  outcome_unknown: (m) =>
+    `The outcome is unknown: it may have been submitted. Check before retrying${m ? ` (${m})` : ""}.`,
+  forbidden: () => "Only tenant admins can do that.",
+};
+
+/** Rethrow an ApiError with a friendly v2 message; the code and status are kept. */
+function friendlyV2(err: unknown): never {
+  if (err instanceof ApiError) {
+    const fn = V2_MESSAGES[err.code];
+    const generic = STATUS_TEXT[err.status] === err.message;
+    if (fn) throw new ApiError(err.status, err.code, fn(generic ? "" : err.message));
+  }
+  throw err;
+}
 
 async function toApiError(res: Response): Promise<ApiError> {
   let code = `http_${res.status}`;
@@ -442,6 +610,8 @@ interface RequestOptions {
   /** Skip the X-Tenant header (auth and public endpoints). */
   noTenant?: boolean;
   signal?: AbortSignal;
+  /** Extra request headers (e.g. Idempotency-Key). */
+  headers?: Record<string, string>;
 }
 
 export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
@@ -449,6 +619,7 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
   const headers: Record<string, string> = {
     Accept: "application/json",
     "X-Requested-With": "scraper0",
+    ...opts.headers,
   };
   const tenant = opts.noTenant ? null : tenantHeader();
   if (tenant) headers["X-Tenant"] = tenant;
@@ -617,4 +788,39 @@ export const api = {
       data<ProviderTestResult>(`/v1/admin/ai/providers/${enc(id)}/test`, { method: "POST", noTenant: true }),
     usage: (days = 30) => data<AdminUsage>("/v1/admin/usage", { query: { days }, noTenant: true }),
   },
+};
+
+// v2 responses keep their codes; messages are made friendly (see V2_MESSAGES).
+const v2 = <T>(path: string, opts?: RequestOptions) => data<T>(path, opts).catch(friendlyV2);
+const actionPath = (siteId: string, name: string) => `/v2/sites/${enc(siteId)}/actions/${enc(name)}`;
+
+export const sitesApi = {
+  list: (q?: string) => v2<SiteSummary[]>("/v2/sites", { query: { q } }),
+  /** `existing: true` means another tenant (or the platform) onboarded it already. */
+  onboard: async (base_url: string) => {
+    const res = await request<{ data: Site; existing?: boolean }>("/v2/sites", {
+      method: "POST",
+      body: { base_url },
+    }).catch(friendlyV2);
+    return { site: res.data, existing: !!res.existing };
+  },
+  get: (siteId: string) => v2<Site>(`/v2/sites/${enc(siteId)}`),
+
+  createAction: (siteId: string, body: ActionCreate) =>
+    v2<Action>(`/v2/sites/${enc(siteId)}/actions`, { method: "POST", body }),
+  action: (siteId: string, name: string) => v2<Action>(actionPath(siteId, name)),
+  learn: (siteId: string, name: string) => v2<LearnStarted>(`${actionPath(siteId, name)}/learn`, { method: "POST" }),
+  repair: (siteId: string, name: string) => v2<LearnStarted>(`${actionPath(siteId, name)}/repair`, { method: "POST" }),
+  versions: (siteId: string, name: string) => v2<ActionVersion[]>(`${actionPath(siteId, name)}/versions`),
+  lock: (siteId: string, name: string, version: number) =>
+    v2<ActionContract>(`${actionPath(siteId, name)}/versions/${enc(String(version))}/lock`, { method: "POST" }),
+  contract: (siteId: string, name: string) => v2<ActionContract>(`${actionPath(siteId, name)}/contract`),
+
+  read: (siteId: string, name: string, body: ReadRequest = {}) =>
+    v2<ReadResult>(`${actionPath(siteId, name)}/read`, { method: "POST", body }),
+  lookup: (siteId: string, name: string, body: LookupRequest) =>
+    v2<LookupResult>(`${actionPath(siteId, name)}/read`, { method: "POST", body }),
+  /** Not used by the dashboard (writes are code-only and run by callers); here for completeness. */
+  write: (siteId: string, name: string, body: WriteRequest, idempotencyKey?: string) =>
+    v2<WriteResult>(`${actionPath(siteId, name)}/write`, { method: "POST", body, headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }),
 };

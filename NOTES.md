@@ -61,3 +61,23 @@ code remains on `main`.
 - List-page recipes (many items per page from repeated cards): the biggest remaining saving on fetches.
 - JS sites whose data needs clicks or login (infinite scroll beyond one screen, POST/GraphQL APIs, authenticated APIs).
 - hashtaglocal-backend: send `X-API-Key`, then flip `SCRAPER0_LEGACY_KEYLESS=false`. Optionally consume `/v1/items/changes`.
+
+## v0.2: sites and actions API (2026-11-26)
+Contract: [spec/api-v2.md](spec/api-v2.md) (deviations recorded at its end); design: [spec/sites-and-actions.md](spec/sites-and-actions.md).
+- **Code:** `api/routes_v2.py` (HTTP), `services/sites.py` (site ids, schemas, seeding, versions, lock, contract),
+  `services/site_calls.py` (read: freshness, one refresh per site+action, `from` / online filtering, per-tenant AI
+  verdict cache; lookup; idempotent write), `services/site_runs.py` (jobs `site_learn`, `site_refresh`, `site_write`
+  and the shared item store). Migration `0002` adds `sites`, `site_actions`, `action_versions`, `site_items`,
+  `ai_verdicts`, `write_records`. Startup seeds the five code actions as locked version 1 (idempotent).
+- **One refresh in flight:** the read claims `site_actions.refresh_job_id` with a conditional UPDATE in the same
+  transaction that inserts the job; concurrent reads join that job. A claim left by a crashed worker is cleared when
+  its job is terminal; one that was never dispatched is failed after 15 min.
+- **Refresh scrapes everything** (online, past-today; connectors with empty filter data), normalised by the engine's
+  postprocess, upserted by `item_key` (link, or `link#hash` when items share a link). `updated_at` moves only when the
+  content hash changes (image URL excluded, as in v1). AI runs per read, per tenant, batched 8 per call, with a generic
+  prompt built from the caller's `categories` (not hashtaglocal's hardcoded list), and is cached in `ai_verdicts`.
+- **Writes:** `write_records` per (tenant, site, action, key). `auth` travels Fernet-encrypted in the job input only.
+  SMARTONEBLR REPORT_ISSUE already reports "Submitting complaint" before the click; that marks the submit step.
+- **Verified:** `uv run pytest` 154 passed (14 new in `tests/test_v2.py`) on SQLite and on Postgres 14 (`scraper0` user,
+  `CONNECTION LIMIT 3`); migration up/down/up and `alembic check` clean on both; `ruff` clean.
+- **Not verified:** live learn of a real site through v2, real AI filtering, BBMP writes live (same gaps as v0.1).

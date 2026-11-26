@@ -7,6 +7,7 @@ const groups: NavGroup[] = [
   {
     items: [
       { href: "/app", label: "Overview", exact: true },
+      { href: "/app/sites", label: "Sites" },
       { href: "/app/jobs", label: "Jobs" },
       { href: "/app/sources", label: "Sources" },
       { href: "/app/items", label: "Items" },

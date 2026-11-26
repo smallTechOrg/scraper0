@@ -279,3 +279,109 @@ class ItemChange(Base):
     entity_key: Mapped[str] = mapped_column(String(120))
     change: Mapped[str] = mapped_column(String(16))                              # created | updated
     created_at: Mapped[datetime] = mapped_column(TS, default=now)
+
+
+# ------------------------------------------------------------------ v2: sites and actions (shared across tenants)
+
+class Site(Base):
+    """A website, shared by every tenant. site_id = host without www., dots → dashes."""
+    __tablename__ = "sites"
+    site_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    base_url: Mapped[str] = mapped_column(String(500))
+    name: Mapped[str] = mapped_column(String(255))
+    created_by_tenant: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TS, default=now)
+
+
+class SiteAction(Base):
+    """Something scraper0 can do on a site. Refresh bookkeeping (one in flight, freshness, health) lives here."""
+    __tablename__ = "site_actions"
+    __table_args__ = (UniqueConstraint("site_id", "name", name="uq_site_action"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    site_id: Mapped[str] = mapped_column(ForeignKey("sites.site_id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(16))                                # read | write
+    mode: Mapped[str] = mapped_column(String(16), default="list")               # list | lookup | write
+    entity: Mapped[str] = mapped_column(String(64), default="event")
+    implementation: Mapped[str] = mapped_column(String(16), default="learned")  # learned | code
+    connector: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    connector_action: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    seed_urls: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(16), default="draft")            # draft | locked | broken
+    locked_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_schema: Mapped[dict] = mapped_column(JSON, default=dict)
+    output_schema: Mapped[dict] = mapped_column(JSON, default=dict)
+    last_success_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    last_failure_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    last_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_scraped_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)  # last successful scrape (freshness)
+    scrape_seq: Mapped[int] = mapped_column(Integer, default=0)                 # bumps on each successful scrape
+    refresh_job_id: Mapped[str | None] = mapped_column(String(32), nullable=True)  # the one refresh in flight
+    created_by_tenant: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TS, default=now)
+
+
+class ActionVersion(Base):
+    __tablename__ = "action_versions"
+    __table_args__ = (UniqueConstraint("action_id", "version", name="uq_action_version"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    action_id: Mapped[int] = mapped_column(ForeignKey("site_actions.id", ondelete="CASCADE"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16), default="draft")            # draft | locked | retired | broken
+    preview: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    implementation_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    job_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TS, default=now)
+    locked_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    locked_by: Mapped[str | None] = mapped_column(String(320), nullable=True)
+
+
+class SiteItem(Base):
+    """Items of a list read action, shared by every tenant. id = itm_ + sha256(site_id|action|item_key)[:24]."""
+    __tablename__ = "site_items"
+    __table_args__ = (UniqueConstraint("site_id", "action", "item_key", name="uq_site_item"),
+                      Index("ix_site_items_action", "site_id", "action", "seen_seq"))
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    site_id: Mapped[str] = mapped_column(String(255))
+    action: Mapped[str] = mapped_column(String(64))
+    item_key: Mapped[str] = mapped_column(String(500))
+    data: Mapped[dict] = mapped_column(JSON)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    first_seen_at: Mapped[datetime] = mapped_column(TS, default=now)
+    last_seen_at: Mapped[datetime] = mapped_column(TS, default=now)
+    updated_at: Mapped[datetime] = mapped_column(TS, default=now)
+    seen_seq: Mapped[int] = mapped_column(Integer, default=0)                   # SiteAction.scrape_seq when last seen
+    version: Mapped[int | None] = mapped_column(Integer, nullable=True)        # action version that scraped it
+    job_id: Mapped[str | None] = mapped_column(String(32), nullable=True)      # last refresh job that saw it
+
+
+class AIVerdict(Base):
+    """Per-tenant AI filter/category verdict for one item content under one option set."""
+    __tablename__ = "ai_verdicts"
+    tenant_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    item_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    content_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    options_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    selected: Mapped[bool] = mapped_column(Boolean, default=True)
+    category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TS, default=now)
+
+
+class WriteRecord(Base):
+    """Idempotency record of a write: one per (tenant, site, action, key)."""
+    __tablename__ = "write_records"
+    __table_args__ = (UniqueConstraint("tenant_id", "site_id", "action", "idem_key", name="uq_write_record"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32))
+    site_id: Mapped[str] = mapped_column(String(255))
+    action: Mapped[str] = mapped_column(String(64))
+    idem_key: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(16))           # running | succeeded | outcome_unknown | failed
+    job_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    submit_started: Mapped[bool] = mapped_column(Boolean, default=False)
+    output: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TS, default=now)
+    updated_at: Mapped[datetime] = mapped_column(TS, default=now)
