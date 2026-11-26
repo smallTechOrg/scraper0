@@ -1,16 +1,14 @@
 name: deploy-staging
 
-# Deploys scraper0 (API + dashboard) to Cloud Run staging, from any branch:
-#   git push -f origin HEAD:deploy/staging          (deploys what you have checked out)
-#   or Actions → deploy-staging → Run workflow      (needs this file on the default branch)
+# Deploys scraper0 (API + dashboard) to Cloud Run staging, from any pushed branch, on demand:
+#   gh workflow run deploy-staging.yml --ref <branch> [-f target=both|api|dashboard]
+#   or Actions → deploy-staging → Run workflow → pick the branch (the button appears once this file is on main)
 # Only the container images change: service settings, secrets, database, queue and scheduler are
 # set up once by deploy/deploy.sh and are left untouched here.
 # Auth: GitHub OIDC → Workload Identity (provider scraper0-github, this repo only) → scraper0-deploy-staging,
 # which can only deploy the two scraper0 staging services and push to the scraper0 image repository.
 
 on:
-  push:
-    branches: [deploy/staging]
   workflow_dispatch:
     inputs:
       target:
