@@ -46,6 +46,7 @@ class Options:
     category_filter: str = ""
     use_llm_extraction: bool = True
     learn: bool = True
+    relearn: bool = False           # ignore stored recipes and cached pages (dashboard learn / repair)
     progress: Callable[[str, dict], None] | None = None
     cancelled: Callable[[], bool] | None = None
     existing_links: set[str] = field(default_factory=set)
@@ -123,7 +124,7 @@ class Engine:
     def scrape_source(self, seed: str, o: Options) -> list[Event]:
         copts = CrawlOptions(
             max_list_pages=o.max_list_pages, max_detail_pages=o.max_detail_pages, workers=o.workers,
-            allow_llm=o.use_llm_extraction, learn=o.learn, link_hint=EVENT_LINK_HINT,
+            allow_llm=o.use_llm_extraction, learn=o.learn, relearn=o.relearn, link_hint=EVENT_LINK_HINT,
             skip_links=set(o.existing_links), progress=o.progress, cancelled=o.cancelled,
         )
         items, stats = self._crawler(o.portal).crawl(seed, EVENT_SPEC, copts)

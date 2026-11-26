@@ -250,7 +250,7 @@ def test_learn_lock_contract_and_read_from_snapshot(app, tenants, acts):
     assert v["preview"]["items"][0]["category"] is None and v["preview"]["items"][0]["name"] == "Ulsoor Lake Cleanup"
     snap = v["implementation_snapshot"]
     assert snap["strategy"] == "json_api" and snap["recipes"][0]["rules"]["api_url"] == "https://acts.org/api/activities"
-    assert acts.renders == 1
+    assert acts.renders == 2           # the page, plus its /activities list page once (looking for detail links)
 
     c = acme.post("/v2/sites/acts-org/actions/fetch_events/versions/1/lock", headers=H).json()["data"]
     assert c["version"] == 1 and c["endpoint"] == "http://testserver/v2/sites/acts-org/actions/fetch_events/read"
@@ -265,7 +265,7 @@ def test_learn_lock_contract_and_read_from_snapshot(app, tenants, acts):
     d = read(key, site="acts-org").json()["data"]
     assert d["complete"] is True and d["refresh_job_id"] and d["health"] == "ok" and d["version"] == 1
     assert [i["data"]["name"] for i in d["items"]] == ["Ulsoor Lake Cleanup", "Cubbon Tree Walk"]   # online dropped
-    assert acts.renders == 1                                                                 # no browser on refresh
+    assert acts.renders == 2                                                                 # no browser on refresh
     it = d["items"][1]
     assert re.fullmatch(r"itm_[0-9a-f]{24}", it["id"])
     assert set(it["data"]) == {"name", "start_time", "end_time", "address", "link", "organisation", "image", "category",
@@ -574,3 +574,66 @@ def test_write_timeout_is_outcome_unknown_and_running_replays(app, tenants, repo
     report.gate.set()
     t.join(10)
     assert out["r"].status_code == 200 and out["r"].json()["data"]["replayed"] is False and report.calls == 2
+
+
+# ------------------------------------------------------------------ image copies
+
+def _png(color) -> bytes:
+    import io
+
+    from PIL import Image
+    out = io.BytesIO()
+    Image.new("RGB", (2400, 1200), color).save(out, "PNG")
+    return out.getvalue()
+
+
+def test_expiring_images_are_copied_and_served(app, tenants, everest, settings, monkeypatch):
+    """Signed image URLs (Airtable, S3) expire within hours: stored items point at our own permanent copy."""
+    from scraper0.services import media
+    monkeypatch.setattr(settings, "copy_images", True)
+    imgs = {f"https://cdn.x/{i}.jpg": _png((i * 40, 10, 10)) for i in range(1, 6)}
+    calls = []
+
+    def fake_download(url):
+        calls.append(url)
+        base = url.split("?")[0]
+        return (imgs[base], "image/png") if base in imgs else None
+    monkeypatch.setattr(media, "download", fake_download)
+    for e in everest.events:
+        e["image"] += "?sig=abc&expires=1"
+    everest.events[1]["image"] = "https://cdn.x/missing.jpg"         # can't be copied: keeps its URL
+
+    d = read(tenants["acme_key"]).json()["data"]
+    by_name = {i["data"]["name"]: i["data"] for i in d["items"]}
+    lake = by_name["Lake Cleanup"]["image"]
+    assert lake.startswith(settings.public_base_url + "/v2/media/") and "sig=" not in lake
+    assert by_name["Tree Planting"]["image"] == "https://cdn.x/missing.jpg"
+
+    r = TestClient(app).get(lake[len(settings.public_base_url):])          # public: no login, no key
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg" and "immutable" in r.headers["cache-control"]
+    from PIL import Image
+    import io
+    assert max(Image.open(io.BytesIO(r.content)).size) == media.MAX_SIDE   # shrunk from 2400 px
+
+    # the next scrape gets a new signature for the same image: the stored copy is reused, nothing downloaded
+    n = len(calls)
+    for e in everest.events:
+        e["image"] = e["image"].replace("sig=abc", "sig=def")
+    from scraper0.services.site_runs import store_items
+    store_items("teameverest-ngo", "fetch_events", 1, "j", [dict(e) for e in everest.events if e["name"] != "Old Drive"])
+    assert [c for c in calls[n:] if "missing" not in c] == []
+    assert TestClient(app).get("/v2/media/" + "0" * 40).status_code == 404
+
+
+def test_repair_relearns_from_the_live_site(app, tenants, acts):
+    """Learn/repair must look at the site again, not replay the stored recipe."""
+    acme = tenants["acme"]
+    acme.post("/v2/sites", json={"base_url": "https://acts.org"}, headers=H)
+    acme.post("/v2/sites/acts-org/actions", json={"name": "fetch_events", "kind": "read", "entity": "event"}, headers=H)
+    acme.post("/v2/sites/acts-org/actions/fetch_events/learn", headers=H)
+    first = acts.renders
+    r = acme.post("/v2/sites/acts-org/actions/fetch_events/repair", headers=H)
+    assert r.status_code == 202
+    job = acme.get(f"/v1/jobs/{r.json()['data']['job_id']}").json()["data"]
+    assert job["status"] == "succeeded" and job["result"]["preview"]["count"] == 3
+    assert acts.renders > first                                       # rendered again: really re-learned

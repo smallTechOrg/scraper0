@@ -12,6 +12,7 @@ os.environ["SCRAPER0_BOOTSTRAP_LEGACY_TENANT"] = ""
 os.environ["SCRAPER0_MIN_HOST_INTERVAL_S"] = "0"
 os.environ["SCRAPER0_RESPECT_ROBOTS"] = "false"
 os.environ["SCRAPER0_RENDER_JS"] = "never"
+os.environ["SCRAPER0_COPY_IMAGES"] = "false"           # tests that copy images turn it on and fake the download
 os.environ.pop("GROQ_API_KEY", None)
 
 import pytest  # noqa: E402

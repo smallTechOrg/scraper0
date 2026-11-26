@@ -43,6 +43,7 @@ class CrawlOptions:
     allow_llm: bool = True
     learn: bool = True
     use_cache: bool = True
+    relearn: bool = False                      # learn from the live site: ignore stored recipes and the page cache
     link_hint: re.Pattern | None = None        # regex on URL path: likely detail pages
     skip_links: set[str] = field(default_factory=set)
     progress: Callable[[str, dict], None] | None = None   # (message, data) after each page
@@ -101,7 +102,7 @@ class Crawler:
         is_html = "<html" in content[:3000].lower() or "<body" in content.lower() or "html" in (ctype or "")
         key = f"{spec.key}@v{spec.version}"
         h = page_fingerprint(content, page_text(content)[0]) if is_html else content_hash(content)
-        if opts.use_cache:
+        if opts.use_cache and not opts.relearn:
             cached = _best_effort(self.store.cached_page, url, key, h)
             if cached is not None:
                 stats.bump("cache")
@@ -123,8 +124,8 @@ class Crawler:
             return [], "none"
 
         domain, pat = domain_of(url), path_pattern(url)
-        recipes = [r for r in self.store.recipes_for(domain, spec.key)
-                   if r["strategy"] == "selectors" and pattern_matches(r["path_pattern"], url)]
+        recipes = [] if opts.relearn else [r for r in self.store.recipes_for(domain, spec.key)
+                                           if r["strategy"] == "selectors" and pattern_matches(r["path_pattern"], url)]
         for r in recipes:
             if r["status"] != "active":
                 continue
@@ -254,6 +255,7 @@ class Crawler:
                                              counted_llm if opts.allow_llm else None)
         if rules is None:
             return None
+        self._better_link(seed, rules, rr, hrefs)
         bodies = dict(rr.json_responses)
         items = self._api_items(spec, rules, bodies[rules["api_url"]], seed, bodies)
         if not items:
@@ -270,10 +272,35 @@ class Crawler:
         stats.bump("api")
         return items
 
+    def _better_link(self, seed: str, rules: dict, rr, hrefs: list[str]) -> None:
+        """A home page often links to items as '/list?scrollTo={id}' while the list page itself links to
+        real detail pages ('/list/{slug}'). When the learned link has the item only in its query, render
+        that list page once (learning time only) and prefer a detail-page link found there."""
+        template = rules.get("link_template")
+        render = getattr(self.fetcher, "render", None)
+        if render is None or not json_extract.link_in_query_only(template):
+            return
+        from urllib.parse import urljoin, urlsplit
+
+        from bs4 import BeautifulSoup
+        listing = urljoin(rr.final_url or seed, urlsplit(template).path)
+        try:
+            more = render(listing)
+        except Exception as e:  # noqa: BLE001 - best effort; the query link still works
+            log.info("relink_render_failed", url=listing, error=str(e))
+            return
+        if more is None:
+            return
+        extra = [urljoin(more.final_url or listing, a["href"])
+                 for a in BeautifulSoup(more.html, "html.parser").find_all("a", href=True)]
+        absolute = [urljoin(rr.final_url or seed, h) for h in hrefs]
+        if json_extract.relink(rules, rr.json_responses, absolute + extra):
+            log.info("link_template_improved", seed=seed, old=template, new=rules["link_template"])
+
     def crawl(self, seed: str, spec: EntitySpec, opts: CrawlOptions | None = None) -> tuple[list[dict], CrawlStats]:
         opts = opts or CrawlOptions()
         stats = CrawlStats()
-        api_items = _best_effort(self._try_api_recipe, seed, spec, stats)
+        api_items = None if opts.relearn else _best_effort(self._try_api_recipe, seed, spec, stats)
         if api_items:
             if opts.progress:
                 opts.progress(f"{seed} → {len(api_items)} item(s) from its API", {"pages": stats.pages})

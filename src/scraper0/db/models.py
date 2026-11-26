@@ -357,6 +357,18 @@ class SiteItem(Base):
     job_id: Mapped[str | None] = mapped_column(String(32), nullable=True)      # last refresh job that saw it
 
 
+class Media(Base):
+    """A stored copy of an item image (services/media.py). id = sha256(stored bytes)[:40]."""
+    __tablename__ = "media"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    content_type: Mapped[str] = mapped_column(String(100))
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    size: Mapped[int] = mapped_column(Integer)
+    source_url: Mapped[str] = mapped_column(Text)
+    source_key: Mapped[str] = mapped_column(String(64), index=True)   # sha256 of the source URL without query
+    created_at: Mapped[datetime] = mapped_column(TS, default=now)
+
+
 class AIVerdict(Base):
     """Per-tenant AI filter/category verdict for one item content under one option set."""
     __tablename__ = "ai_verdicts"
