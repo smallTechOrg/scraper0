@@ -66,6 +66,8 @@ class Settings(BaseSettings):
     # --- crawling
     min_host_interval_s: float = 1.0
     respect_robots: bool = True
+    # auto = render pages that are JavaScript shells in headless Chromium (and read the JSON APIs they call)
+    render_js: Literal["auto", "never"] = "auto"
 
     # --- connectors
     captcha_solver: Literal["llm", "easyocr", "auto"] = "llm"   # auto = easyocr when installed, else llm

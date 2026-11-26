@@ -18,7 +18,9 @@ from typing import Callable
 from scraper0.core import discovery
 from scraper0.core.entities import EntitySpec
 from scraper0.core.llm_extract import llm_extract, page_text
+from scraper0.core import json_extract
 from scraper0.core.recipes import apply_recipe, domain_of, learn_recipe, merge_rules, path_pattern, pattern_matches
+from scraper0.core.render import is_js_shell
 import structlog
 
 from scraper0.core.store import Store
@@ -54,6 +56,7 @@ class Cancelled(Exception):
 @dataclass
 class CrawlStats:
     pages: int = 0
+    rendered: int = 0
     by_method: dict = field(default_factory=dict)
     recipes_learned: int = 0
     llm_calls: int = 0
@@ -120,7 +123,8 @@ class Crawler:
             return [], "none"
 
         domain, pat = domain_of(url), path_pattern(url)
-        recipes = [r for r in self.store.recipes_for(domain, spec.key) if pattern_matches(r["path_pattern"], url)]
+        recipes = [r for r in self.store.recipes_for(domain, spec.key)
+                   if r["strategy"] == "selectors" and pattern_matches(r["path_pattern"], url)]
         for r in recipes:
             if r["status"] != "active":
                 continue
@@ -166,7 +170,7 @@ class Crawler:
     def _fetch_extract(self, url, spec, opts, allow_llm, stats):
         if opts.cancelled and opts.cancelled():
             raise Cancelled()
-        got = self.fetcher.get(url)
+        got = self._load(url, stats)
         if not got:
             return [], None
         stats.pages += 1
@@ -176,16 +180,126 @@ class Crawler:
                                                             "recipes_learned": stats.recipes_learned})
         return items, got[0]
 
+    # ---------------------------------------------------------------- JS pages and their JSON APIs
+    def _load(self, url: str, stats: CrawlStats, want_render: bool = False):
+        """→ (content, content_type, RenderResult | None). Static fetch first; when the page is a JavaScript
+        shell (or its host is known to be), render it in a browser."""
+        render = getattr(self.fetcher, "render", None)
+        host_known = url.split("://", 1)[-1].split("/", 1)[0] in getattr(self.fetcher, "render_hosts", ())
+        got = None if (host_known and render) else self.fetcher.get(url)
+        if got is not None:
+            content, ctype = got
+            is_html = "html" in (ctype or "") or "<html" in content[:3000].lower()
+            if not (render and is_html and is_js_shell(content, page_text(content)[0])):
+                return content, ctype, None
+        if render is None:
+            return (got[0], got[1], None) if got else None
+        rr = render(url)
+        if rr is None:
+            return (got[0], got[1], None) if got else None
+        stats.rendered += 1
+        return rr.html, "text/html", rr
+
+    def _api_key(self, seed: str) -> str:
+        from urllib.parse import urlsplit
+        return "api:" + (urlsplit(seed).path.rstrip("/") or "/")
+
+    def _api_bodies(self, rules: dict, have: dict[str, str]) -> dict[str, str]:
+        bodies = dict(have)
+        for lk in (rules.get("lookups") or {}).values():
+            if lk["api_url"] not in bodies:
+                got = self.fetcher.get(lk["api_url"])
+                if got:
+                    bodies[lk["api_url"]] = got[0]
+        return bodies
+
+    def _api_items(self, spec: EntitySpec, rules: dict, body: str, seed: str, bodies: dict, recipe_id=None) -> list[dict]:
+        out = json_extract.items_from_rules(spec, rules, body, seed, bodies)
+        for item in out:
+            item["_meta"] = {"url": item.get("link") or seed, "extraction": "api", "recipe_id": recipe_id,
+                             "confidence": spec.score(item)}
+        return out
+
+    def _try_api_recipe(self, seed: str, spec: EntitySpec, stats: CrawlStats) -> list[dict] | None:
+        """A stored API recipe for this start URL: call the endpoint directly — no browser, no LLM."""
+        key = self._api_key(seed)
+        for r in self.store.recipes_for(domain_of(seed), spec.key):
+            if r["strategy"] != "json_api" or r["path_pattern"] != key or r["status"] != "active":
+                continue
+            got = self.fetcher.get(r["rules"]["api_url"])
+            items = []
+            if got:
+                try:
+                    items = self._api_items(spec, r["rules"], got[0], seed,
+                                            self._api_bodies(r["rules"], {r["rules"]["api_url"]: got[0]}), r["id"])
+                except ValueError:
+                    items = []
+            _best_effort(self.store.record_recipe_result, r["id"], bool(items))
+            if items:
+                stats.pages += 1
+                stats.bump("api_recipe")
+                return items
+        return None
+
+    def _learn_api(self, seed: str, spec: EntitySpec, rr, opts: CrawlOptions, stats: CrawlStats) -> list[dict] | None:
+        """The rendered page fetched JSON: find the array holding this entity, learn the mapping, store it."""
+        if not rr.json_responses:
+            return None
+        from bs4 import BeautifulSoup
+        hrefs = [a["href"] for a in BeautifulSoup(rr.html, "html.parser").find_all("a", href=True)]
+        def counted_llm(prompt):
+            stats.llm_calls += 1
+            return self.llm(prompt)
+        rules = json_extract.learn_api_rules(spec, rr.json_responses, seed, hrefs,
+                                             counted_llm if opts.allow_llm else None)
+        if rules is None:
+            return None
+        bodies = dict(rr.json_responses)
+        items = self._api_items(spec, rules, bodies[rules["api_url"]], seed, bodies)
+        if not items:
+            return None
+        if opts.learn:
+            rid = _best_effort(self.store.save_recipe, domain_of(seed), self._api_key(seed), spec.key, "json_api",
+                               rules, seed, spec.version)
+            if rid:
+                stats.recipes_learned += 1
+                for item in items:
+                    item["_meta"]["recipe_id"] = rid
+                log.info("api_recipe_learned", seed=seed, api=rules["api_url"], fields=sorted(rules["mapping"]),
+                         by=rules.get("learned_by"))
+        stats.bump("api")
+        return items
+
     def crawl(self, seed: str, spec: EntitySpec, opts: CrawlOptions | None = None) -> tuple[list[dict], CrawlStats]:
         opts = opts or CrawlOptions()
         stats = CrawlStats()
+        api_items = _best_effort(self._try_api_recipe, seed, spec, stats)
+        if api_items:
+            if opts.progress:
+                opts.progress(f"{seed} → {len(api_items)} item(s) from its API", {"pages": stats.pages})
+            return api_items, stats
         items: list[dict] = []
         seen, pool = set(), []
         page, n = seed, 0
         while page and n < opts.max_list_pages and page not in seen:
             seen.add(page)
             n += 1
-            got, html = self._fetch_extract(page, spec, opts, allow_llm=False, stats=stats)
+            if opts.cancelled and opts.cancelled():
+                raise Cancelled()
+            loaded = self._load(page, stats)
+            if loaded is None:
+                break
+            html, ctype, rr = loaded
+            stats.pages += 1
+            if rr is not None and n == 1:
+                learned = self._learn_api(seed, spec, rr, opts, stats)
+                if learned:      # the page's own API is authoritative: no need to walk its links
+                    if opts.progress:
+                        opts.progress(f"{seed} → {len(learned)} item(s) from its API", {"pages": stats.pages})
+                    return learned, stats
+            got = self.extract_page(page, html, ctype, spec, opts, allow_llm=rr is not None, stats=stats)
+            if opts.progress:
+                opts.progress(f"{page} → {len(got)} item(s)", {"pages": stats.pages, "llm_calls": stats.llm_calls})
             items += got
             if html is None or not ("<html" in html[:3000].lower() or "<body" in html.lower()):
                 break
@@ -215,7 +329,8 @@ class Crawler:
 
     def _rank_links(self, links: list[str], seed: str, spec: EntitySpec, opts: CrawlOptions) -> list[str]:
         hints = self.store.hints(seed, spec.key)
-        known = {r["path_pattern"] for r in self.store.recipes_for(domain_of(seed), spec.key)}
+        known = {r["path_pattern"] for r in self.store.recipes_for(domain_of(seed), spec.key)
+                 if r["strategy"] == "selectors"}
         ranked, explore = [], 0
         for u in links:
             p = path_pattern(u)

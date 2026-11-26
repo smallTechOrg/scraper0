@@ -34,9 +34,12 @@ class EntitySpec:
     fields: list[FieldSpec]
     version: int = 1
     tenant_id: str | None = None      # None = built-in (learned layouts shared by all tenants)
+    # optional enrichment fields: filled when a structured source (JSON API) has them, never asked of the LLM
+    extra_fields: list[FieldSpec] = field(default_factory=list)
 
     def __post_init__(self):
         self.fields = [f if isinstance(f, FieldSpec) else FieldSpec(**f) for f in self.fields]
+        self.extra_fields = [f if isinstance(f, FieldSpec) else FieldSpec(**f) for f in self.extra_fields]
         if not re.fullmatch(r"[a-z][a-z0-9_]{0,40}", self.name):
             raise ValueError("entity name must be snake_case")
         if not any(f.required for f in self.fields):
@@ -57,9 +60,17 @@ class EntitySpec:
     def field(self, name: str) -> FieldSpec | None:
         return next((f for f in self.fields if f.name == name), None)
 
+    @property
+    def all_fields(self) -> list[FieldSpec]:
+        return self.fields + self.extra_fields
+
+    def any_field(self, name: str) -> FieldSpec | None:
+        return next((f for f in self.all_fields if f.name == name), None)
+
     def to_dict(self) -> dict:
         d = asdict(self)
         d.pop("tenant_id", None)
+        d.pop("extra_fields", None)
         d["builtin"] = self.tenant_id is None
         return d
 
@@ -73,7 +84,7 @@ class EntitySpec:
         """Normalise one raw value to the field's type. Returns None when it can't."""
         from scraper0.core.dates import parse_datetime
         from scraper0.core.text import clean
-        f = self.field(fname)
+        f = self.any_field(fname)
         if f is None or value is None:
             return None
         if isinstance(value, (list, tuple)):
@@ -122,6 +133,9 @@ EVENT_SPEC = EntitySpec(
         FieldSpec("image", "image", False, "banner/poster image url", weight=1),
         FieldSpec("description", "text", False, "short summary", weight=1),
         FieldSpec("price", "text", False, "ticket price or Free", weight=0.25),
+    ],
+    extra_fields=[
+        FieldSpec("latitude", "number"), FieldSpec("longitude", "number"), FieldSpec("is_online", "bool"),
     ],
 )
 

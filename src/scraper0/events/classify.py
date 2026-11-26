@@ -16,15 +16,29 @@ _RULES: list[tuple[str, re.Pattern]] = [
 ]
 
 
-def classify_type(*texts: str | None) -> str:
-    blob = " ".join(t for t in texts if t)[:4000]
+def _match(blob: str) -> str | None:
     for etype, rx in _RULES:
         if rx.search(blob):
             return etype
-    return "OTHER"
+    return None
+
+
+def classify_type(name: str | None, description: str | None = None) -> str:
+    """The title decides. Only when it says nothing do we look at the opening of the description —
+    a word like "waste" deep in a long description says little about what the event is."""
+    return _match(name or "") or _match((description or "")[:300]) or "OTHER"
 
 
 _ONLINE = re.compile(r"\b(online|virtual|webinar|zoom|google meet|ms teams|remote)\b", re.I)
+
+
+_ONLINE_ADDRESS = re.compile(r"\s*(online|virtual|zoom|google meet|ms teams|microsoft teams|webinar|remote)"
+                             r"(\s*(event|meeting|session|only))?\s*", re.I)
+
+
+def address_is_online(address: str | None) -> bool:
+    """The venue field itself says the event is online ("Online", "Zoom", "Virtual event")."""
+    return bool(address and _ONLINE_ADDRESS.fullmatch(address))
 
 
 def looks_online(*texts: str | None) -> bool:

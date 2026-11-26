@@ -46,6 +46,16 @@
 4. **heuristic** (events): labelled text ("Date:", "Venue:")
 5. **AI:** the spec-driven prompt returns values and verbatim sources, then a recipe is learned from them
 
+**JavaScript-only pages.** When the static HTML is an empty shell (almost no visible text, but scripts), the page is
+rendered in headless Chromium (`core/render.py`: one browser on a dedicated thread; every sub-request passes the SSRF
+guard; images/fonts/media are blocked). While it renders, same-site JSON responses to GET requests are captured.
+`core/json_extract.py` then finds the array that holds the entity and maps keys to fields: name heuristics first, the
+LLM only if those fail. It verifies the mapping on the real items, works out the item link pattern from the rendered
+anchors, and resolves `*_id` references into names from other captured arrays. The result is stored as a recipe with
+strategy `json_api`, keyed `api:<start path>`. The next crawl of that start URL calls the API directly; if that stops
+working, it renders and relearns. With a stored or freshly learned API, the page's links are not walked: the API is
+the full list.
+
 Per site, **crawl hints** remember which link patterns yielded items, rank them first, and skip patterns that never do.
 
 ## AI

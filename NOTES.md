@@ -29,8 +29,18 @@ code remains on `main`.
 - **Captcha**: vision LLM by default, so there's no PyTorch in the image. EasyOCR is still available via `uv sync --extra ocr` +
   `SCRAPER0_CAPTCHA_SOLVER=easyocr|auto`.
 
+## After the first user test (2026-11-24): JavaScript sites
+- `https://karmana.in` returned 0 items: it is a React app, so the static HTML is an empty shell (31 visible characters, no links).
+- Added browser rendering for JS shells, JSON API capture, and learned API recipes (see architecture.md).
+- Result on karmana.in: the first crawl renders once (~11 s) and learns `GET /api/activities`, giving 448 activities → 8 upcoming
+  in-person events, with organiser names joined from `/api/changemakers` and links from the site's own anchors. **0 AI calls.**
+  The second crawl uses no browser (~4 s).
+- Also fixed: an address of just "Online" now marks the event online, and event type is decided by the title before the description.
+- Side effect on the build machine: `playwright install chromium` removed older Chromium builds (1228, 1248) from
+  `~/Library/Caches/ms-playwright`. Other repos using Playwright need `uv run playwright install chromium` again.
+
 ## Verified
-- Offline suite: `uv run pytest`, 131 passed (API end-to-end, learning, engine, ingest, 70 connector tests), on SQLite
+- Offline suite: `uv run pytest`, 140 passed (API end-to-end, learning, engine, ingest, 70 connector tests), on SQLite
   **and on Postgres 14** with the `scraper0` user at `CONNECTION LIMIT 3` (`SCRAPER0_TEST_POSTGRES_URL=…`). `ruff` is clean.
   Migrations are idempotent on Postgres, and `alembic check` shows no drift.
 - Frontend: `tsc`, `eslint` and `next build` are clean. In a real browser against the API on Postgres: login, dashboard,
@@ -49,5 +59,5 @@ code remains on `main`.
 
 ## Next
 - List-page recipes (many items per page from repeated cards): the biggest remaining saving on fetches.
-- JS-rendered sites: a Playwright fetch mode for the generic crawler.
+- JS sites whose data needs clicks or login (infinite scroll beyond one screen, POST/GraphQL APIs, authenticated APIs).
 - hashtaglocal-backend: send `X-API-Key`, then flip `SCRAPER0_LEGACY_KEYLESS=false`. Optionally consume `/v1/items/changes`.

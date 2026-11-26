@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
 
-from scraper0.events.classify import classify_type, looks_online
+from scraper0.events.classify import address_is_online, classify_type, looks_online
 from scraper0.core.dates import IST, is_past, parse_datetime
 from scraper0.events.extractors import extract_ics
 from scraper0.events.schema import EVENT_TYPES, Event, clean, score
@@ -213,6 +213,8 @@ def review_flags(events: list[Event], now: datetime | None = None) -> None:
         w = e.warnings
         if not e.start_time and "no_date" not in w:
             w.append("no_date")
+        if address_is_online(e.address):
+            e.is_online = True
         if not e.address and not (e.is_online or looks_online(e.name, e.description)) and "no_address" not in w:
             w.append("no_address")
         if is_past(e.end_time or e.start_time, now) and "past" not in w:

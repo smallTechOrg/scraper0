@@ -39,7 +39,11 @@ def _int(v, default, lo, hi):
 
 def _fetcher() -> Fetcher:
     st = get_settings()
-    return Fetcher(min_host_interval=st.min_host_interval_s, respect_robots=st.respect_robots)
+    renderer = None
+    if st.render_js == "auto":
+        from scraper0.core.render import shared_renderer
+        renderer = shared_renderer()
+    return Fetcher(min_host_interval=st.min_host_interval_s, respect_robots=st.respect_robots, renderer=renderer)
 
 
 def run(job_id: str, tenant_id: str, kind: str, inp: dict, source_id: str | None, rep) -> dict:

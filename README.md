@@ -13,6 +13,7 @@ It started as hashtaglocal's `web-scraper`, which this repo replaces. hashtagloc
 |---|---|
 | **Any entity type** | `event` is built in. Define others (jobs, NGOs, products…) as data: fields + types + required. |
 | **Learning crawler** | Page cache → structured data (JSON-LD, microdata, ICS, RSS) → learned recipe → heuristic → AI, and it learns a recipe from the AI answer. Layout changes are detected and relearned. Recipes for built-in entities are shared across tenants. |
+| **JavaScript sites** | Pages that are empty until scripts run (React/Vue apps) are rendered in headless Chromium. The JSON APIs the page calls are captured, the one holding the entity is mapped and verified, and it is stored as an API recipe: later runs call that API directly, with no browser and no AI. |
 | **Uploads** | Posters/screenshots (vision AI), PDFs, CSV/TSV/JSON, ICS, pasted text → reviewable events with warnings. |
 | **Connectors** | TEAMEVEREST, MYBHARATGOVIN, IVOLUNTEERIN (events), SMARTONEBLR (BBMP complaints: report + track, Playwright, AI captcha), WEBEVENTS (any site). |
 | **Jobs** | Every scrape is a job: async, or `wait=true`; live progress over SSE; cancel; Cloud Tasks on Cloud Run. |

@@ -14,7 +14,9 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PATH="/app/.venv/bin:$PATH" PYT
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
 # Chromium + its system libraries (≈ 400 MB); needed only by the browser-driven connectors
-RUN playwright install --with-deps chromium && rm -rf /var/lib/apt/lists/* \
+# Playwright's bundled Node needs libatomic1 before it can run its own --with-deps installer
+RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 \
+    && playwright install --with-deps chromium && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home-dir /app scraper0 && chmod -R a+rx /ms-playwright
 COPY alembic.ini ./
 COPY migrations ./migrations

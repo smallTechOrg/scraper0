@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, fields as dc_fields
 from typing import Callable
 
 from scraper0.core import discovery
-from scraper0.events.classify import classify_type, looks_online
+from scraper0.events.classify import address_is_online, classify_type, looks_online
 from scraper0.core.dates import is_past
 from scraper0.events.dedupe import dedupe
 from scraper0.events.extractors import extract_all, extract_heuristic
@@ -95,8 +95,8 @@ def item_to_event(item: dict, portal: str) -> Event:
     kw["sources"] = kw.get("sources") or [kw["link"]]
     e = Event(**{"name": "", **kw})
     e.confidence = min(score(e), meta.get("confidence", 1.0) or 1.0)
-    if meta.get("recipe_id"):
-        e.extraction = "recipe"
+    if meta.get("extraction") in ("recipe", "api"):
+        e.extraction = meta["extraction"]
     return e
 
 
@@ -128,7 +128,8 @@ class Engine:
         )
         items, stats = self._crawler(o.portal).crawl(seed, EVENT_SPEC, copts)
         self.last_crawl_stats.append({"source": seed, "pages": stats.pages, "by_method": stats.by_method,
-                                      "llm_calls": stats.llm_calls, "recipes_learned": stats.recipes_learned})
+                                      "llm_calls": stats.llm_calls, "recipes_learned": stats.recipes_learned,
+                                      "rendered": stats.rendered})
         return [item_to_event(i, o.portal) for i in items]
 
     # ---------------------------------------------------------------- pipeline
@@ -170,7 +171,8 @@ class Engine:
             if not o.include_past and is_past(e.start_time if not e.end_time else e.end_time, o.now):
                 drop["past"] += 1
                 continue
-            e.is_online = e.is_online or (not e.address and looks_online(e.name, e.description))
+            e.is_online = (e.is_online or address_is_online(e.address)
+                           or (not e.address and looks_online(e.name, e.description)))
             if e.is_online and not o.include_online:
                 drop["online"] += 1
                 continue

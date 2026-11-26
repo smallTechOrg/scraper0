@@ -35,4 +35,5 @@ A standalone, multi-tenant scraping service that replaces `web-scraper`. It extr
 10. **Stored results:** items are stored per tenant + entity with a content hash, first_seen / last_seen / changed_at. `GET /v1/items/changes?cursor=…` returns only new or changed items.
 11. **Landing page:** what scraper0 does, how it works, the entity/upload/learning features, and a request-access form. Generic product copy, with no hashtaglocal branding.
 12. **Git:** local repo with work on a feature branch. Nothing is pushed or committed to a remote without your OK.
-13. **Out of v0.1:** list-page recipes (many items per page), JS-rendered sites beyond the BBMP flow, billing/payments, self-serve signup.
+13. **Out of v0.1:** list-page recipes for static HTML (many items per page), billing/payments, self-serve signup.
+    (JS-rendered sites were out at intake and were added on 2026-11-24 after the first real test: see NOTES.md.)

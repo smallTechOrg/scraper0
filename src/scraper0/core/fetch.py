@@ -35,7 +35,9 @@ def is_public_url(url: str) -> bool:
 
 class Fetcher:
     def __init__(self, min_host_interval: float = 1.0, timeout: int = 20, retries: int = 3,
-                 respect_robots: bool = True, session=None):
+                 respect_robots: bool = True, session=None, renderer=None):
+        self.renderer = renderer                    # core.render.Renderer, or None = never render
+        self.render_hosts: set[str] = set()         # hosts whose pages turned out to be JS shells
         self.min_host_interval = min_host_interval
         self.timeout = timeout
         self.retries = retries
@@ -45,6 +47,18 @@ class Fetcher:
         self._last_hit: dict[str, float] = {}
         self._robots: dict[str, robotparser.RobotFileParser | None] = {}
         self._cache: dict[str, tuple[str, str]] = {}
+
+    # -- browser rendering ---------------------------------------------------
+    def render(self, url: str):
+        """Render a JavaScript page in a headless browser → RenderResult | None. Same politeness and
+        safety rules as get(): public URLs only, robots.txt, per-host throttle."""
+        if self.renderer is None or not is_public_url(url) or not self.allowed(url):
+            return None
+        self._wait(url)
+        res = self.renderer.render(url)
+        if res is not None:
+            self.render_hosts.add(urlsplit(url).netloc)
+        return res
 
     # -- robots -------------------------------------------------------------
     def allowed(self, url: str) -> bool:
