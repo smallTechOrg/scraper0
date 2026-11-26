@@ -128,6 +128,14 @@ def copy_images(urls: list[str]) -> dict[str, str]:
     return out
 
 
+def swap_images(items: list[dict], field: str = "image") -> None:
+    """Point each item's image at our copy, in place (callers that return the same dicts show it too)."""
+    copies = copy_images([i.get(field) for i in items if isinstance(i, dict) and isinstance(i.get(field), str)])
+    for i in items:
+        if isinstance(i, dict) and i.get(field) in copies:
+            i[field] = copies[i[field]]
+
+
 def get(media_id: str) -> tuple[bytes, str] | None:
     with session_scope() as s:
         m = s.get(Media, media_id)

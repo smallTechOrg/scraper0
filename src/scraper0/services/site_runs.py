@@ -311,10 +311,7 @@ def store_items(site_id: str, name: str, version: int, job_id: str, events: list
         record_failure(site_id, name, f"0 valid items (the last run had {prev})")
         return None
     datas = [event_data(e) for e in events]
-    copies = media.copy_images([d["image"] for d in datas if d.get("image")])   # no DB session open here
-    for d in datas:
-        if d.get("image") in copies:
-            d["image"] = copies[d["image"]]
+    media.swap_images(datas)                   # signed image URLs expire: keep our own copy (no DB session open)
     seen, payload = set(), []
     for k, d in zip(batch_keys(datas), datas):
         if k not in seen:
