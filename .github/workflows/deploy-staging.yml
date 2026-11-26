@@ -1,0 +1,107 @@
+name: deploy-staging
+
+# Deploys scraper0 (API + dashboard) to Cloud Run staging, from any pushed branch, on demand:
+#   gh workflow run deploy-staging.yml --ref <branch> [-f target=both|api|dashboard]
+#   or Actions → deploy-staging → Run workflow → pick the branch (the button appears once this file is on main)
+# Only the container images change: service settings, secrets, database, queue and scheduler are
+# set up once by deploy/deploy.sh and are left untouched here.
+# Auth: GitHub OIDC → Workload Identity (provider scraper0-github, this repo only) → scraper0-deploy-staging,
+# which can only deploy the two scraper0 staging services and push to the scraper0 image repository.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: What to deploy
+        type: choice
+        options: [both, api, dashboard]
+        default: both
+
+concurrency:
+  group: scraper0-deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT: ${{ vars.GCP_PROJECT }}
+  REGION: ${{ vars.GCP_REGION }}
+  REPO: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/scraper0
+  API_SERVICE: scraper0-staging-api
+  WEB_SERVICE: scraper0-staging-web
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: { version: "0.9.7" }
+      - run: uv python install 3.12
+      - run: uv sync --frozen
+      - run: uv run ruff check src tests
+      - run: uv run pytest -q
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-24.04
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - id: tag
+        run: echo "tag=$(git rev-parse --short HEAD)-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+      - uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build + push API image
+        if: (inputs.target || 'both') != 'dashboard'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REPO }}/api:${{ steps.tag.outputs.tag }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+      - name: Deploy API (image only)
+        if: (inputs.target || 'both') != 'dashboard'
+        run: |
+          gcloud run services update "$API_SERVICE" --region "$REGION" --quiet \
+            --image "$REPO/api:${{ steps.tag.outputs.tag }}"
+
+      - name: API URL (compiled into the dashboard)
+        id: api
+        run: echo "url=$(gcloud run services describe "$API_SERVICE" --region "$REGION" --format 'value(status.url)')" >> "$GITHUB_OUTPUT"
+      - name: Build + push dashboard image
+        if: (inputs.target || 'both') != 'api'
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          push: true
+          build-args: SCRAPER0_API_URL=${{ steps.api.outputs.url }}
+          tags: ${{ env.REPO }}/web:${{ steps.tag.outputs.tag }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+      - name: Deploy dashboard (image only)
+        if: (inputs.target || 'both') != 'api'
+        run: |
+          gcloud run services update "$WEB_SERVICE" --region "$REGION" --quiet \
+            --image "$REPO/web:${{ steps.tag.outputs.tag }}"
+
+      - name: Smoke test
+        run: |
+          set -e
+          API="${{ steps.api.outputs.url }}"
+          WEB="$(gcloud run services describe "$WEB_SERVICE" --region "$REGION" --format 'value(status.url)')"
+          curl -fsS "$API/api/health" | tee /dev/stderr | grep -q '"db":"ok"'
+          curl -fsS -o /dev/null "$WEB/login"
+          echo "### scraper0 staging deployed (${{ steps.tag.outputs.tag }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Dashboard: $WEB" >> "$GITHUB_STEP_SUMMARY"
+          echo "- API: $API" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,69 @@
+[project]
+name = "scraper0"
+version = "0.1.0"
+description = "Multi-tenant scraping service: entities from websites, uploads and connectors; learns each page layout once."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.2",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "structlog>=24.1",
+    "httpx>=0.27",
+    "curl-cffi>=0.7",
+    "beautifulsoup4>=4.12",
+    "python-dateutil>=2.9",
+    "pillow>=10.4",
+    "pypdf>=4.3",
+    "playwright>=1.45",
+    "cryptography>=42",
+    "argon2-cffi>=23.1",
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+# Local OCR for captchas (pulls PyTorch, several GB). Default is the vision LLM.
+ocr = ["easyocr>=1.7", "opencv-python-headless>=4.10"]
+
+[project.scripts]
+scraper0 = "scraper0.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+    "pytest-timeout>=2.3",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scraper0"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra -m 'not llm and not network and not browser'"
+timeout = 120
+markers = [
+    "llm: makes a real AI provider call (needs a key in .env)",
+    "network: fetches real websites",
+    "browser: drives a real Playwright Chromium",
+]
+
+[tool.ruff]
+line-length = 120
+exclude = [".venv", "data", "frontend", "legacy"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
