@@ -43,6 +43,8 @@ def upsert_items(tenant_id: str, entity_key: str, items: list[dict], source_id: 
     from sqlalchemy.exc import IntegrityError
     if not items:
         return {"created": 0, "updated": 0, "unchanged": 0}
+    from scraper0.services import media
+    media.swap_images(items)                   # signed image URLs expire: keep our own copy (no DB session open)
     seen, payload = set(), []
     for k, d in zip(batch_keys(items), items):
         if k not in seen:                      # exact duplicates within one batch count once

@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Callable
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import structlog
 
@@ -262,13 +262,16 @@ def coverage(spec: EntitySpec, items: list[dict], mapping: dict, base: str) -> f
 
 def infer_link_template(items: list[dict], hrefs: list[str]) -> str | None:
     """Find how the site links to an item: an href containing one of the item's own values (id, slug…),
-    generalised to a template like '/activities?activity_id={id}'. It must hold for two different items."""
+    generalised to a template like '/activities/{slug}'. It must hold for two different items. A template
+    with the value in the URL path (a detail page) beats one with it only in the query or fragment, which
+    is usually a list page scrolled to the item ('/activities?scrollTo={id}')."""
     if not hrefs or len(items) < 2:
         return None
     href_set = set(hrefs)
     paths = [p for p, v in flatten(items[0], depth=1).items()
              if not isinstance(v, (bool, float)) and len(str(v)) >= 4 and " " not in str(v)]
     paths.sort(key=lambda p: (0 if _seg(p) in ("id", "slug", "uuid", "_id", "handle") else 1, p))
+    found: list[str] = []
     for path in paths[:12]:
         by_val = {str(get_path(it, path)): it for it in items if get_path(it, path) not in (None, "")}
         if len(by_val) < 2:
@@ -279,8 +282,18 @@ def infer_link_template(items: list[dict], hrefs: list[str]) -> str | None:
                 continue
             template = h.replace(sv, "{" + path + "}")
             if any(v != sv and template.replace("{" + path + "}", v) in href_set for v in by_val):
-                return template
-    return None
+                found.append(template)
+                break
+    return min(found, key=_template_rank) if found else None
+
+
+def _template_rank(template: str) -> tuple[int, int]:
+    return (1 if link_in_query_only(template) else 0, len(template))
+
+
+def link_in_query_only(template: str | None) -> bool:
+    """True when the item's value appears only in the query/fragment, not the path."""
+    return bool(template) and "{" not in urlsplit(template).path
 
 
 def _link(template: str | None, item: dict, page_url: str) -> str | None:
@@ -412,3 +425,21 @@ def learn_api_rules(spec: EntitySpec, json_responses: list[tuple[str, str]], pag
     if lookups:
         rules["lookups"] = lookups
     return rules
+
+
+def relink(rules: dict, json_responses: list[tuple[str, str]], hrefs: list[str]) -> bool:
+    """Re-infer rules['link_template'] with more hrefs (e.g. from the list page the current template points
+    at). Keeps the new template only if it ranks better. → True when it changed."""
+    body = next((b for u, b in json_responses if u == rules["api_url"]), None)
+    if body is None:
+        return False
+    data = json.loads(body)
+    arr = get_path(data, rules["items_path"]) if rules["items_path"] else data
+    dicts = [x for x in arr if isinstance(x, dict)] if isinstance(arr, list) else []
+    template = infer_link_template(dicts, hrefs)
+    old = rules.get("link_template")
+    if template and (old is None or _template_rank(template) < _template_rank(old)):
+        rules["link_template"] = template
+        return True
+    return False
+

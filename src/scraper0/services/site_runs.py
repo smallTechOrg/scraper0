@@ -17,6 +17,7 @@ from scraper0.core.dates import IST
 from scraper0.core.entities import EVENT_SPEC
 from scraper0.db.models import ActionVersion, SiteAction, SiteItem, WriteRecord, now
 from scraper0.db.session import session_scope
+from scraper0.services import media
 from scraper0.services import sites as sites_svc
 from scraper0.services.items import batch_keys
 
@@ -117,11 +118,12 @@ def run_code(connector: str, connector_action: str, tenant_id: str, rep, ai, dat
 
 
 def crawl_learned(seeds: list[str], portal: str, rep, ai) -> tuple[list[dict], dict]:
-    """Engine over the seed URLs with learning on and the shared recipe store → (events, merged by_method)."""
+    """Engine over the seed URLs, re-learning from the live site (stored recipes and cached pages are ignored,
+    then replaced) → (events, merged by_method). Used by learn and repair, so both really look at the site again."""
     from scraper0.core.store import default_store
     from scraper0.events.engine import Engine, Options
     eng = Engine(_fetcher(), llm=ai.text_fn("extract"), filter_llm=ai.text_fn("filter"), store=default_store())
-    res = eng.run(seeds, Options(portal=portal, include_past=True, include_online=True, learn=True,
+    res = eng.run(seeds, Options(portal=portal, include_past=True, include_online=True, learn=True, relearn=True,
                                  use_llm_extraction=True, progress=rep, cancelled=rep.cancelled))
     errors = res["stats"].get("errors") or []
     if errors and len(errors) == len(seeds):
@@ -309,6 +311,7 @@ def store_items(site_id: str, name: str, version: int, job_id: str, events: list
         record_failure(site_id, name, f"0 valid items (the last run had {prev})")
         return None
     datas = [event_data(e) for e in events]
+    media.swap_images(datas)                   # signed image URLs expire: keep our own copy (no DB session open)
     seen, payload = set(), []
     for k, d in zip(batch_keys(datas), datas):
         if k not in seen:

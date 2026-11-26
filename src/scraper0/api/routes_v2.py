@@ -14,6 +14,18 @@ from scraper0.services.sites import SiteError
 router = APIRouter(prefix="/v2")
 
 
+@router.get("/media/{media_id}", include_in_schema=False)
+def get_media(media_id: str):
+    """A stored image copy (services/media.py). Public: item image URLs must load anywhere, and the id is
+    the hash of the bytes, so it can't be guessed and never changes."""
+    from scraper0.services import media
+    got = media.get(media_id) if len(media_id) == 40 and media_id.isalnum() else None
+    if got is None:
+        raise APIError(404, "not_found", "no such image")
+    data, ctype = got
+    return Response(data, media_type=ctype, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
 def _call(fn, *a, **kw):
     try:
         return fn(*a, **kw)

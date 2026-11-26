@@ -15,7 +15,7 @@ ORGS = [{"id": "o1", "name": "Lake Friends", "type": "ngo"}, {"id": "o2", "name"
 
 
 def activity(i, name, date, time_, addr, org, online=False):
-    return {"id": f"act-{i:04d}", "name": name, "changemaker_id": org, "other_organizer_name": None,
+    return {"id": f"act-{i:04d}", "slug": f"{name.lower().replace(' ', '-')}-{i}", "name": name, "changemaker_id": org, "other_organizer_name": None,
             "description": f"<p>Join <b>{name}</b><br>Bring water.</p>", "date": date, "date_end": None, "time": None,
             "start_time": time_, "end_time": None, "image_url": None, "media_urls": [f"/files/{i}.webp"],
             "location": {"address": addr, "latitude": 12.9 + i / 100, "longitude": 77.6, "is_online": online},
@@ -28,7 +28,10 @@ ACTS = [activity(1, "Ulsoor Lake Cleanup", "2026-12-05", "07:00", "Ulsoor Lake, 
         activity(4, "Ongoing Petition", None, None, "Online", "o2")]            # no date → not an event we can place
 
 
-def rendered_html():
+def rendered_html(url="https://acts.org/"):
+    if url.endswith("/activities"):           # the list page links to real detail pages
+        cards = "".join(f'<a href="/activities/{a["slug"]}">{a["name"]}</a>' for a in ACTS)
+        return f"<html><body><h1>All activities</h1>{cards}</body></html>"
     cards = "".join(f'<a href="/activities?scrollTo={a["id"]}&activity_id={a["id"]}">{a["name"]}</a>' for a in ACTS)
     return f"<html><body><h1>Activities</h1>{cards}<a href='/about'>About</a></body></html>"
 
@@ -54,7 +57,7 @@ class JSFetcher:
 
     def render(self, url):
         self.renders.append(url)
-        return RenderResult(html=rendered_html(), final_url=url, json_responses=[
+        return RenderResult(html=rendered_html(url), final_url=url, json_responses=[
             ("https://acts.org/api/changemakers", json.dumps(ORGS)),
             ("https://acts.org/api/activities", json.dumps(self.acts))])
 
@@ -96,6 +99,13 @@ def test_api_mapping_learned_without_llm():
     assert a["link"] == "https://acts.org/activities?scrollTo=act-0002&activity_id=act-0002"
 
 
+def test_detail_page_link_beats_scroll_to_link():
+    hrefs = ([f"/activities?scrollTo={a['id']}&activity_id={a['id']}" for a in ACTS]
+             + [f"https://acts.org/activities/{a['slug']}" for a in ACTS])
+    assert jx.infer_link_template(ACTS, hrefs) == "https://acts.org/activities/{slug}"
+    assert jx.link_in_query_only("/activities?scrollTo={id}") and not jx.link_in_query_only("/a/{slug}?x=1")
+
+
 def test_time_only_value_is_never_a_date():
     """'16:45' alone would parse as today 16:45 — a start_time key holding only times must not be used alone."""
     acts = [dict(a, date=None) for a in ACTS[:3]]
@@ -106,7 +116,9 @@ def test_crawl_renders_once_then_uses_api_directly(store):
     f = JSFetcher()
     items, stats = Crawler(store, f, no_llm).crawl("https://acts.org/", EVENT_SPEC, CrawlOptions(workers=1))
     assert len(items) == 3 and stats.rendered == 1 and stats.by_method == {"api": 1} and stats.recipes_learned == 1
-    assert f.renders == ["https://acts.org/"]                               # detail links were NOT walked
+    # detail links were NOT walked; the list page was rendered once to find real detail links
+    assert f.renders == ["https://acts.org/", "https://acts.org/activities"]
+    assert items[0]["link"] == "https://acts.org/activities/ulsoor-lake-cleanup-1"
     assert all(i["_meta"]["extraction"] == "api" for i in items)
     [r] = store.list_recipes("acts.org")
     assert r["strategy"] == "json_api" and r["path_pattern"] == "api:/"
@@ -169,7 +181,7 @@ def test_event_engine_on_js_site_filters_online_and_past(store):
     assert [e["name"] for e in res["events"]] == ["Ulsoor Lake Cleanup", "Cubbon Tree Walk"]
     e = res["events"][0]
     assert e["extraction"] == "api" and e["organisation"] == "Lake Friends" and e["latitude"] == 12.91
-    assert e["type"] == "CLEANLINESS_DRIVE" and e["link"].endswith("activity_id=act-0001")
+    assert e["type"] == "CLEANLINESS_DRIVE" and e["link"].endswith("/activities/ulsoor-lake-cleanup-1")
     assert res["stats"]["dropped"]["online"] == 1 and res["stats"]["crawl"][0]["rendered"] == 1
 
 
