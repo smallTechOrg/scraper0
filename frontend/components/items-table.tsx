@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { cellText, formatDate, hostname, isUrl, looksLikeDate } from "@/lib/format";
 import { Badge, Table, Td, Th } from "./ui";
@@ -236,7 +237,6 @@ export interface StoredItemLike {
   data: Record<string, unknown>;
   site_id: string | null;
   action: string | null;
-  private: boolean;
   first_seen_at: string;
   last_seen_at: string;
   updated_at: string;
@@ -270,13 +270,13 @@ export function StoredItemsTable({
           ...(showSite
             ? [
                 it.site_id ? (
-                  <span key="site" title={it.action ?? undefined}>
+                  <Link key="site" href={`/app/sites/${encodeURIComponent(it.site_id)}`} title={it.action ?? undefined}
+                        className="hover:text-accent hover:underline">
                     {it.site_id}
                     {it.action && <span className="text-subtle"> · {it.action}</span>}
-                    {it.private && <Badge className="ml-1">private</Badge>}
-                  </span>
+                  </Link>
                 ) : (
-                  <Badge key="site">{it.private ? "private upload" : "—"}</Badge>
+                  <Badge key="site">—</Badge>
                 ),
               ]
             : []),

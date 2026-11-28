@@ -2,6 +2,9 @@
 
 Status: agreed in discussion on 2026-11-26. Nothing below is built yet unless the "Exists today" column says so.
 
+> **Update (v0.3):** onboarding is now the only way in. Ad-hoc URL crawls, ad-hoc connector runs and uploads are
+> removed; schedules (`/v1/sources`) refresh locked site actions, and admins can "Refresh now" any locked list action.
+
 ## The idea in one paragraph
 
 A caller never sends scraper0 "go scrape this URL somehow". An admin first **onboards a site** and **locks

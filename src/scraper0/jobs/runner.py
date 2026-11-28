@@ -16,16 +16,19 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 import structlog
-from sqlalchemy import delete, select, update
+from sqlalchemy import select, update
 
 from scraper0.config import get_settings
 from scraper0.core.crypto import decrypt, encrypt
-from scraper0.db.models import Job, JobEvent, JobFile, new_id, now
+from scraper0.db.models import Job, JobEvent, new_id, now
 from scraper0.db.session import session_scope
 
 log = structlog.get_logger(__name__)
 TERMINAL = {"succeeded", "failed", "cancelled"}
-KINDS = {"crawl", "connector", "ingest", "site_refresh", "site_learn", "site_write"}
+# Every scrape goes through an onboarded site + locked action (v2): site_* jobs. "connector" runs a code
+# connector internally (v2 lookups and the legacy /api/v1/scrape); nothing submits it from outside.
+# Older "crawl"/"ingest" jobs may still exist as history; they are never run again.
+KINDS = {"connector", "site_refresh", "site_learn", "site_write"}
 STALE_AFTER = timedelta(minutes=10)
 
 _pool: ThreadPoolExecutor | None = None
@@ -42,7 +45,9 @@ def job_public(j: Job, include_result: bool = True) -> dict:
     inp = {k: v for k, v in (j.input or {}).items() if k not in ("auth_enc",)}
     if (j.input or {}).get("auth_enc"):
         inp["auth"] = "***"
+    site_action = inp.get("action") if j.kind.startswith("site_") else inp.get("site_action")
     d = {"id": j.id, "kind": j.kind, "status": j.status, "input": inp, "error": j.error, "progress": j.progress or {},
+         "site_id": inp.get("site_id"), "action": site_action,
          "source_id": j.source_id, "created_at": j.created_at.isoformat() if j.created_at else None,
          "started_at": j.started_at.isoformat() if j.started_at else None,
          "finished_at": j.finished_at.isoformat() if j.finished_at else None}
@@ -53,17 +58,13 @@ def job_public(j: Job, include_result: bool = True) -> dict:
 
 # ------------------------------------------------------------------ submit
 
-def submit(tenant_id: str, kind: str, input: dict, source_id: str | None = None,
-           files: list[tuple[str, bytes]] | None = None) -> str:
+def submit(tenant_id: str, kind: str, input: dict, source_id: str | None = None) -> str:
     if kind not in KINDS:
         raise JobInputError(f"kind must be one of {sorted(KINDS)}")
     input = dict(input or {})
-    _validate(kind, input, files)
+    _validate(kind, input)
     with session_scope() as s:
-        j = add_job(s, tenant_id, kind, input, source_id)
-        for name, data in files or []:
-            s.add(JobFile(job_id=j.id, filename=name[:300], data=data))
-        return j.id
+        return add_job(s, tenant_id, kind, input, source_id).id
 
 
 def add_job(s, tenant_id: str, kind: str, input: dict, source_id: str | None = None, job_id: str | None = None) -> Job:
@@ -80,23 +81,12 @@ def add_job(s, tenant_id: str, kind: str, input: dict, source_id: str | None = N
     return j
 
 
-def _validate(kind: str, inp: dict, files) -> None:
-    if kind == "crawl":
-        urls = inp.get("urls")
-        if not isinstance(urls, list) or not urls or not all(isinstance(u, str) and u.startswith(("http://", "https://")) for u in urls):
-            raise JobInputError("input.urls must be a non-empty list of http(s) URLs")
-        if len(urls) > 20:
-            raise JobInputError("at most 20 urls per job")
-        if not isinstance(inp.get("options", {}), dict):
-            raise JobInputError("input.options must be an object")
-    elif kind == "connector":
+def _validate(kind: str, inp: dict) -> None:
+    if kind == "connector":
         if not inp.get("connector") or not inp.get("action"):
             raise JobInputError("input.connector and input.action are required")
         if not isinstance(inp.get("data", {}), dict):
             raise JobInputError("input.data must be an object")
-    elif kind == "ingest":
-        if not (files or (inp.get("text") or "").strip() or inp.get("urls")):
-            raise JobInputError("provide at least one of: files, text, urls")
 
 
 # ------------------------------------------------------------------ dispatch
@@ -213,8 +203,6 @@ def run_job(job_id: str) -> None:
         status, error = "failed", f"internal error: {type(e).__name__}: {str(e)[:300]}"
     finally:
         beat_stop.set()
-        with session_scope() as s:
-            s.execute(delete(JobFile).where(JobFile.job_id == job_id))
     with session_scope() as s:
         j = s.get(Job, job_id)
         j.status, j.result, j.error, j.finished_at = status, result, error, now()

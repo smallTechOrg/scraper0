@@ -15,8 +15,7 @@ import {
   PageHeader,
   Select,
 } from "@/components/ui";
-import { EntityOptions } from "@/components/job-forms";
-import { api, type ItemSort } from "@/lib/api";
+import { api, type EntitySpec, type ItemSort } from "@/lib/api";
 import { useAsync } from "@/lib/hooks";
 
 const PAGE = 50;
@@ -105,7 +104,7 @@ function ItemsView() {
     <>
       <PageHeader
         title="Items"
-        description="One store for everything scraped. Items belong to their site and are updated by every run that sees them, whoever starts it. Uploads stay private to your workspace."
+        description="One store for everything scraped. Every item belongs to an onboarded site and is updated by every run that sees it, whoever starts it."
       />
       <div className="space-y-6">
         <Card>
@@ -199,5 +198,32 @@ export default function ItemsPage() {
     <Suspense fallback={<LoadingState />}>
       <ItemsView />
     </Suspense>
+  );
+}
+
+function EntityOptions({ entities }: { entities: EntitySpec[] }) {
+  const builtin = entities.filter((e) => e.builtin);
+  const custom = entities.filter((e) => !e.builtin);
+  return (
+    <>
+      {builtin.length > 0 && (
+        <optgroup label="Built-in">
+          {builtin.map((e) => (
+            <option key={e.name} value={e.name}>
+              {e.name}
+            </option>
+          ))}
+        </optgroup>
+      )}
+      {custom.length > 0 && (
+        <optgroup label="Custom">
+          {custom.map((e) => (
+            <option key={e.name} value={e.name}>
+              {e.name}
+            </option>
+          ))}
+        </optgroup>
+      )}
+    </>
   );
 }

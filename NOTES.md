@@ -108,3 +108,17 @@ scraped image isn't scraper0's job, and the caller (hashtaglocal) copies images 
 original links back and drops the `media` table. For signed links that expire (Airtable's last ~2 h), items carry
 `image_expires_at` (`core/signed_urls.py`), and a read rescrapes first when stored links are about to expire, so callers
 always get links that still work at the time of the read.
+
+
+## Onboarding only (v0.3, 2026-11-28)
+
+Decided with the user: no ad-hoc URL crawls and no uploads. Every scrape goes through an onboarded site + locked action
+(learned, or a code connector).
+- `POST /v1/jobs` → 422 pointing at `/v2/sites`; `/v1/jobs/ingest` is gone. `connector` jobs remain internal (v2 lookups,
+  legacy `/api/v1/scrape`). Old crawl/ingest jobs stay as read-only history.
+- `POST /v2/sites/{site}/actions/{name}/refresh` (admin): refresh now, ignoring freshness, joining a running refresh.
+- Sources are schedules on site actions (`site_id`, `action`). Migration 0006 converts connector sources to their
+  code action and URL sources to the site's locked `fetch_events`; others are deleted. It also drops `job_files` and
+  deletes private (upload) items with their change rows.
+- Dashboard: New job page removed; Jobs = history linked to sites; Sites action panel has "Refresh now" with live
+  progress; Sources edits schedules on locked site actions.

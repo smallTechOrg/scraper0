@@ -1,10 +1,10 @@
 """The one item store (table `items`) and its change feed.
 
-Site items are shared by every tenant: whatever run scrapes a site — a v2 refresh, a v1 crawl or connector
-job, by any tenant — upserts the same rows, keyed (site_id, action, item_key), with
-id = itm_ + sha256(site_id|action|item_key)[:24]. Each run bumps `last_seen_at` on every item it saw and
-`updated_at` only when the content changed. Private items (uploads, tenant-defined entities) belong to one
-tenant and are visible to it only.
+Every item belongs to an onboarded site + action and is shared by every tenant: whatever run scrapes a
+site — a v2 refresh or a code connector run, by any tenant — upserts the same rows, keyed
+(site_id, action, item_key), with id = itm_ + sha256(site_id|action|item_key)[:24]. Each run bumps
+`last_seen_at` on every item it saw and `updated_at` only when the content changed. (The `tenant_id` column,
+once used for uploads, is always null now.)
 """
 from __future__ import annotations
 
@@ -54,15 +54,6 @@ def content_hash(data: dict) -> str:
 
 def site_item_id(site_id: str, action: str, key: str) -> str:
     return "itm_" + hashlib.sha256(f"{site_id}|{action}|{key}".encode()).hexdigest()[:24]
-
-
-def private_item_id(tenant_id: str, entity_key: str, key: str) -> str:
-    return "itm_" + hashlib.sha256(f"tenant:{tenant_id}|{entity_key}|{key}".encode()).hexdigest()[:24]
-
-
-def is_shared_entity(entity_key: str) -> bool:
-    """Built-in entities (event, …) are shared via sites; tenant-defined ones ("<tenant>:<name>") stay private."""
-    return ":" not in entity_key
 
 
 def action_for(entity_key: str) -> str:
@@ -162,14 +153,6 @@ def upsert_site_items(site_id: str, action: str, entity_key: str, items: list[di
     return _write(payload, entity_key=entity_key, site_id=site_id, action=action, tenant_id=None, job_id=job_id)
 
 
-def upsert_private_items(tenant_id: str, entity_key: str, items: list[dict], job_id: str | None = None,
-                         site_id: str | None = None) -> dict:
-    if not items:
-        return {"created": 0, "updated": 0, "unchanged": 0}
-    payload = _payload(items, content_hash, lambda k: private_item_id(tenant_id, entity_key, k))
-    return _write(payload, entity_key=entity_key, site_id=site_id, action=None, tenant_id=tenant_id, job_id=job_id)
-
-
 def _add(total: dict, part: dict) -> dict:
     for k, v in part.items():
         total[k] = total.get(k, 0) + v
@@ -177,45 +160,25 @@ def _add(total: dict, part: dict) -> dict:
 
 
 def store_run_items(tenant_id: str, entity_key: str, items: list[dict], job_id: str | None = None,
-                    seeds: list[str] | None = None, site: tuple[str, str] | None = None,
-                    private: bool = False) -> dict:
-    """Store what a v1 job returned → {created, updated, unchanged}.
-
-    - `site=(site_id, action)`: a known site (a connector's code action).
-    - `seeds`: a crawl — each item belongs to the site of the seed it came from (one seed: that one; several:
-      the seed whose host matches the item's source/link, else the first).
-    - neither: the site of each item's own link. Items with no site, uploads (`private`) and tenant-defined
-      entities are stored privately for the tenant."""
+                    site: tuple[str, str] | None = None) -> dict:
+    """Store what a code connector returned → {created, updated, unchanged}. `site=(site_id, action)` is the
+    connector's code action; without it each item goes to the site of its own link (registered if new). Items
+    with no site at all are not stored: every item belongs to a site."""
     total = {"created": 0, "updated": 0, "unchanged": 0}
     if not items:
         return total
-    if private or not is_shared_entity(entity_key):
-        site_id = None
-        if not private and seeds:
-            got = _site_of(seeds[0])
-            site_id = got[0] if got else None
-        return upsert_private_items(tenant_id, entity_key, items, job_id, site_id)
-    seed_sites = [g for g in (_site_of(u) for u in seeds or []) if g]
     groups: dict[tuple[str, str], list[dict]] = {}
-    loose: list[dict] = []
     for d in items:
         if site is not None:
             groups.setdefault(site, []).append(d)
             continue
         own = _site_of(d.get("source_url")) or _site_of(d.get("link")) or _site_of((d.get("_meta") or {}).get("url"))
-        if seed_sites:
-            pick = next((g for g in seed_sites if own and g[0] == own[0]), seed_sites[0])
-        else:
-            pick = own
-        if pick is None:
-            loose.append(d)
+        if own is None:
             continue
-        ensure_site(pick[0], pick[1], pick[2], tenant_id)
-        groups.setdefault((pick[0], action_for(entity_key)), []).append(d)
+        ensure_site(own[0], own[1], own[2], tenant_id)
+        groups.setdefault((own[0], action_for(entity_key)), []).append(d)
     for (site_id, action), group in groups.items():
         _add(total, upsert_site_items(site_id, action, entity_key, group, job_id))
-    if loose:
-        _add(total, upsert_private_items(tenant_id, entity_key, loose, job_id))
     return total
 
 

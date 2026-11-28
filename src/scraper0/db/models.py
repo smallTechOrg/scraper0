@@ -7,7 +7,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -207,7 +207,7 @@ class Job(Base):
     __tablename__ = "jobs"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     tenant_id: Mapped[str] = mapped_column(String(32), index=True)
-    kind: Mapped[str] = mapped_column(String(32))                                # crawl | connector | ingest
+    kind: Mapped[str] = mapped_column(String(32))                                # site_* | connector (old: crawl, ingest)
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True)  # queued|running|succeeded|failed|cancelled
     input: Mapped[dict] = mapped_column(JSON)
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -222,15 +222,6 @@ class Job(Base):
     heartbeat_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
 
 
-class JobFile(Base):
-    """Uploaded bytes for an ingest job; deleted when the job finishes (any worker can run the job)."""
-    __tablename__ = "job_files"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    job_id: Mapped[str] = mapped_column(String(32), index=True)
-    filename: Mapped[str] = mapped_column(String(300))
-    data: Mapped[bytes] = mapped_column(LargeBinary)
-
-
 class JobEvent(Base):
     __tablename__ = "job_events"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -241,12 +232,13 @@ class JobEvent(Base):
 
 
 class Source(Base):
+    """A tenant's schedule on a site action: the tick refreshes it every interval_minutes."""
     __tablename__ = "sources"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     tenant_id: Mapped[str] = mapped_column(String(32), index=True)
     name: Mapped[str] = mapped_column(String(200))
-    kind: Mapped[str] = mapped_column(String(32))                                # crawl | connector
-    config: Mapped[dict] = mapped_column(JSON)
+    site_id: Mapped[str] = mapped_column(String(255))                            # an onboarded site …
+    action: Mapped[str] = mapped_column(String(64))                              # … and its locked list action
     interval_minutes: Mapped[int] = mapped_column(Integer, default=1440)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     next_run_at: Mapped[datetime | None] = mapped_column(TS, nullable=True, index=True)

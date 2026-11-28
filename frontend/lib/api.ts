@@ -182,43 +182,16 @@ export function actionName(a: ConnectorAction): string {
   return typeof a === "string" ? a : a.name;
 }
 
-export type JobKind = "crawl" | "connector" | "ingest";
+/**
+ * Every scrape runs through an onboarded site + locked action: site_learn (learn / repair), site_refresh
+ * (a read past its freshness, "Refresh now", a schedule), site_write. "connector" runs a code connector for a
+ * v2 lookup or the legacy /api/v1/scrape. "crawl" and "ingest" only appear in old history.
+ */
+export type JobKind = "site_refresh" | "site_learn" | "site_write" | "connector" | "crawl" | "ingest";
+export const JOB_KINDS: JobKind[] = ["site_refresh", "site_learn", "site_write", "connector"];
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export const JOB_STATUSES: JobStatus[] = ["queued", "running", "succeeded", "failed", "cancelled"];
 export const TERMINAL_STATUSES: JobStatus[] = ["succeeded", "failed", "cancelled"];
-
-export interface CrawlOptions {
-  max_detail_pages?: number;
-  max_list_pages?: number;
-  allow_llm?: boolean;
-  learn?: boolean;
-  use_cache?: boolean;
-  event_filter?: string;
-  category_filter?: string;
-  include_past?: boolean;
-  include_online?: boolean;
-  require_address?: boolean;
-  portal?: string;
-  /** Regex on URL paths of detail pages (non-event entities). */
-  link_pattern?: string;
-}
-
-export interface CrawlInput {
-  entity: string | { name: string; description?: string; fields: EntityField[] };
-  urls: string[];
-  options?: CrawlOptions;
-}
-
-export interface ConnectorInput {
-  connector: string;
-  action: string;
-  data: unknown;
-  auth?: unknown;
-}
-
-export type JobCreate =
-  | { kind: "crawl"; input: CrawlInput; wait?: boolean }
-  | { kind: "connector"; input: ConnectorInput; wait?: boolean };
 
 export interface JobProgress {
   message?: string | null;
@@ -247,7 +220,17 @@ export interface IngestReportEntry {
   error: string | null;
 }
 
-/** result for crawl / ingest jobs. */
+/** result of a site_refresh job. */
+export interface RefreshResult {
+  site_id: string;
+  action: string;
+  version: number;
+  count: number;
+  stored: StoredCounts;
+  ai?: AiResultInfo;
+}
+
+/** result for old crawl / ingest jobs (history only). */
 export interface CrawlResult {
   entity?: string;
   items: Array<Record<string, unknown>>;
@@ -272,10 +255,13 @@ export interface Job {
   kind: JobKind;
   status: JobStatus;
   input: unknown;
-  result: CrawlResult | ConnectorResult | null;
+  result: CrawlResult | ConnectorResult | RefreshResult | Record<string, unknown> | null;
   error: string | { code?: string; message?: string } | null;
   progress: JobProgress | null;
   source_id: string | null;
+  /** The site + action a site_* (or lookup connector) job ran for. */
+  site_id?: string | null;
+  action?: string | null;
   created_at: ISODate;
   started_at: ISODate | null;
   finished_at: ISODate | null;
@@ -284,21 +270,23 @@ export interface Job {
 /** Not spelled out in the spec: assumed to be Job without input/result. */
 export type JobSummary = Omit<Job, "input" | "result"> & Partial<Pick<Job, "input">>;
 
+/** A schedule on an onboarded site action: the scheduler refreshes it every interval_minutes. */
 export interface Source {
   id: string;
   name: string;
-  kind: "crawl" | "connector";
-  config: CrawlInput | ConnectorInput;
+  site_id: string;
+  action: string;
   interval_minutes: number;
   enabled: boolean;
   next_run_at: ISODate | null;
-  last_job: JobSummary | null;
+  /** id is null when the schedule joined another workspace's refresh (status only). */
+  last_job: (Omit<JobSummary, "id"> & { id: string | null }) | null;
 }
 
 export interface SourceCreate {
   name: string;
-  kind: "crawl" | "connector";
-  config: CrawlInput | ConnectorInput;
+  site_id: string;
+  action: string;
   interval_minutes: number;
   enabled?: boolean;
 }
@@ -314,7 +302,6 @@ export interface Item {
   data: Record<string, unknown>;
   site_id: string | null;
   action: string | null;
-  private: boolean;
   /** The last job that saw it. */
   job_id: string | null;
   first_seen_at: ISODate;
@@ -379,6 +366,8 @@ export type JsonSchema = Record<string, unknown>;
 export interface ActionSummary {
   name: string;
   kind: ActionKind;
+  /** list (stored items) | lookup (input → output) | write */
+  mode?: "list" | "lookup" | "write";
   status: ActionStatus;
 }
 
@@ -445,6 +434,12 @@ export interface ActionCreate {
   kind: ActionKind;
   entity: string;
   seed_urls?: string[];
+}
+
+export interface RefreshStarted {
+  job_id: string;
+  joined: boolean;
+  visible: boolean;
 }
 
 export interface LearnStarted {
@@ -752,9 +747,7 @@ export const api = {
 
   connectors: () => data<Connector[]>("/v1/connectors"),
 
-  // Jobs
-  createJob: (body: JobCreate) => data<Job>("/v1/jobs", { method: "POST", body }),
-  ingest: (form: FormData) => data<Job>("/v1/jobs/ingest", { method: "POST", body: form }),
+  // Jobs (history; every scrape runs through a site action)
   jobs: (query?: { status?: string; kind?: string; limit?: number; before?: string }) =>
     data<JobSummary[]>("/v1/jobs", { query }),
   job: (id: string, signal?: AbortSignal) => data<Job>(`/v1/jobs/${enc(id)}`, { signal }),
@@ -771,7 +764,7 @@ export const api = {
   updateSource: (id: string, body: Partial<SourceCreate>) =>
     data<Source>(`/v1/sources/${enc(id)}`, { method: "PATCH", body }),
   deleteSource: (id: string) => request<void>(`/v1/sources/${enc(id)}`, { method: "DELETE" }),
-  runSource: (id: string) => data<Job>(`/v1/sources/${enc(id)}/run`, { method: "POST" }),
+  runSource: (id: string) => data<Job | { id: null; kind: string; status: JobStatus }>(`/v1/sources/${enc(id)}/run`, { method: "POST" }),
 
   // Items
   items: async (query: ItemQuery) => {
@@ -841,6 +834,9 @@ export const sitesApi = {
   action: (siteId: string, name: string) => v2<Action>(actionPath(siteId, name)),
   learn: (siteId: string, name: string) => v2<LearnStarted>(`${actionPath(siteId, name)}/learn`, { method: "POST" }),
   repair: (siteId: string, name: string) => v2<LearnStarted>(`${actionPath(siteId, name)}/repair`, { method: "POST" }),
+  /** Refresh the locked version now (joins a running refresh). `visible`: the job is in your workspace. */
+  refresh: (siteId: string, name: string) =>
+    v2<RefreshStarted>(`${actionPath(siteId, name)}/refresh`, { method: "POST" }),
   versions: (siteId: string, name: string) => v2<ActionVersion[]>(`${actionPath(siteId, name)}/versions`),
   lock: (siteId: string, name: string, version: number) =>
     v2<ActionContract>(`${actionPath(siteId, name)}/versions/${enc(String(version))}/lock`, { method: "POST" }),

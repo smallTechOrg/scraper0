@@ -125,6 +125,27 @@ def repair(site_id: str, name: str, request: Request, response: Response):
     return _learn(site_id, name, request, response)
 
 
+@router.post("/sites/{site_id}/actions/{name}/refresh")
+def refresh(site_id: str, name: str, request: Request, response: Response):
+    """Refresh the locked version now, ignoring freshness (replaces "run connector" from the dashboard).
+    Joins a refresh that is already running for this site + action."""
+    p = _admin(request)
+    if p.tenant is None:
+        raise APIError(400, "no_tenant", "pick a tenant (X-Tenant) to run the refresh as")
+    from scraper0.db.models import Job, now
+    t0 = now()
+    job_id = _call(site_calls.refresh_now, p.tenant.id, site_id, name)
+    if job_id is None:
+        raise APIError(503, "dispatch_failed", "the refresh could not be started; try again")
+    with session_scope() as s:
+        j = s.get(Job, job_id)
+        created = site_calls._aware(j.created_at) if j is not None else None
+        joined = created is not None and created < site_calls._aware(t0)
+        visible = j is not None and j.tenant_id == p.tenant.id     # GET /v1/jobs/{id} works for this tenant
+    response.status_code = 202
+    return {"data": {"job_id": job_id, "joined": joined, "visible": visible}}
+
+
 @router.get("/sites/{site_id}/actions/{name}/versions")
 def versions(site_id: str, name: str, request: Request):
     _viewer(request)

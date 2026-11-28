@@ -290,7 +290,7 @@ export default function EntitiesPage() {
     <>
       <PageHeader
         title="Entities"
-        description="The kinds of things scraper0 extracts. Built-in entities are maintained for you; custom ones are yours to define."
+        description="The kinds of things site actions extract. Learned actions use the built-in event entity today; custom entities are kept for actions that will use them."
         actions={
           <AdminOnly>
             <Button variant="primary" onClick={() => setEditing("new")}>

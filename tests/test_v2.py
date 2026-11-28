@@ -156,8 +156,9 @@ def test_create_site_reuses_existing_and_seeded_actions(app, tenants):
     seed()                                                                                  # idempotent
     sites = {s["site_id"]: s for s in acme.get("/v2/sites").json()["data"]}
     assert {"teameverest-ngo", "mybharat-gov-in", "ivolunteer-in", "smartoneblr-com", "karmana-in"} <= set(sites)
-    assert sites["smartoneblr-com"]["actions"] == [{"name": "report_issue", "kind": "write", "status": "locked"},
-                                                   {"name": "track_issue", "kind": "read", "status": "locked"}]
+    assert sites["smartoneblr-com"]["actions"] == [
+        {"name": "report_issue", "kind": "write", "mode": "write", "status": "locked"},
+        {"name": "track_issue", "kind": "read", "mode": "lookup", "status": "locked"}]
     assert [s["site_id"] for s in acme.get("/v2/sites?q=bharat").json()["data"]] == ["mybharat-gov-in"]
     a = acme.get("/v2/sites/teameverest-ngo/actions/fetch_events").json()["data"]
     assert a["implementation"] == "code" and a["locked_version"] == 1 and a["status"] == "locked"
@@ -592,11 +593,13 @@ def test_repair_relearns_from_the_live_site(app, tenants, acts):
 
 # ------------------------------------------------------------------ one item store, shared via sites
 
-def connector_job(c):
-    r = c.post("/v1/jobs", json={"kind": "connector", "input": {"connector": "TEAMEVEREST", "action": "FETCH_EVENTS"},
-                                 "wait": True}, headers=H)
-    assert r.json()["data"]["status"] == "succeeded", r.text
-    return r.json()["data"]
+def connector_job(c, site="teameverest-ngo"):
+    """Refresh now (dashboard button): runs the locked version — here TeamEverest's code connector."""
+    r = c.post(f"/v2/sites/{site}/actions/fetch_events/refresh", headers=H)
+    assert r.status_code == 202, r.text
+    j = c.get(f"/v1/jobs/{r.json()['data']['job_id']}").json()["data"]
+    assert j["status"] == "succeeded", j
+    return j
 
 
 def by_name(rows):
@@ -622,43 +625,35 @@ def test_rerun_bumps_last_seen_not_updated(app, tenants, everest):
     assert by_name(acme.get("/v1/items").json()["data"])["Lake Cleanup"]["updated_at"] > lake["updated_at"]
 
 
-def test_v1_runs_and_v2_reads_share_item_ids(app, tenants, everest, acts, monkeypatch):
+def test_refreshes_and_reads_share_item_ids(app, tenants, everest, acts, monkeypatch):
     acme, key = tenants["acme"], tenants["acme_key"]
     v2 = {i["data"]["name"]: i["id"] for i in read(key).json()["data"]["items"]}
     connector_job(acme)
     v1 = {i["data"]["name"]: i["id"] for i in acme.get("/v1/items?site=teameverest-ngo").json()["data"]}
     assert v2 and all(v1[n] == i for n, i in v2.items())
-    # a learned site: a v1 crawl job updates the rows the v2 read returns
+    # a learned site: "Refresh now" updates the rows the v2 read returns
     acme.post("/v2/sites", json={"base_url": "https://acts.org"}, headers=H)
     acme.post("/v2/sites/acts-org/actions", json={"name": "fetch_events", "kind": "read", "entity": "event"}, headers=H)
     acme.post("/v2/sites/acts-org/actions/fetch_events/learn", headers=H)
     acme.post("/v2/sites/acts-org/actions/fetch_events/versions/1/lock", headers=H)
     first = read(key, site="acts-org").json()["data"]["items"]
     acts.acts[0]["description"] = "<p>Now with a picnic.</p>"
-    r = acme.post("/v1/jobs", json={"kind": "crawl", "input": {"urls": ["https://acts.org/"], "options": {"include_online": True}},
-                                    "wait": True}, headers=H).json()["data"]
-    assert r["status"] == "succeeded" and r["result"]["stored"]["updated"] == 1, r["result"]["stored"]
+    r = connector_job(acme, site="acts-org")
+    assert r["kind"] == "site_refresh" and r["result"]["stored"]["updated"] == 1, r["result"]["stored"]
     rows = acme.get("/v2/sites/acts-org/actions/fetch_events/items").json()
     assert rows["total"] == 3 and {i["id"] for i in rows["data"]} >= {i["id"] for i in first}
-    after = by_name(read(key, site="acts-org").json()["data"]["items"])
+    after = by_name(read(key, site="acts-org", freshness_hours=48).json()["data"]["items"])
     assert "picnic" in after["Ulsoor Lake Cleanup"]["data"]["description"]
 
 
-def test_private_items_and_change_feed_visibility(app, tenants, everest):
-    from scraper0.services.items import store_run_items
+def test_items_and_change_feed_are_shared_across_tenants(app, tenants, everest):
     acme, zed = tenants["acme"], tenants["zed"]
-    acme_id = acme.get("/v1/tenant").json()["data"]["id"]
-    store_run_items(acme_id, "event", [{"name": "Poster Fair", "start_time": day(4), "link": None}], private=True)
     connector_job(zed)
-    mine = acme.get("/v1/items").json()
-    theirs = zed.get("/v1/items").json()
-    assert mine["total"] == 5 and theirs["total"] == 4
-    poster = by_name(mine["data"])["Poster Fair"]
-    assert poster["private"] is True and poster["site_id"] is None and "Poster Fair" not in by_name(theirs["data"])
+    mine, theirs = acme.get("/v1/items").json(), zed.get("/v1/items").json()
+    assert mine["total"] == theirs["total"] == 4 and all(i["private"] is False for i in mine["data"])
     feed_a = acme.get("/v1/items/changes").json()["data"]
     feed_z = zed.get("/v1/items/changes").json()["data"]
-    assert len(feed_a) == 5 and len(feed_z) == 4
-    assert {c["item"]["id"] for c in feed_z} <= {c["item"]["id"] for c in feed_a}
+    assert len(feed_a) == len(feed_z) == 4 and {c["item"]["id"] for c in feed_z} == {c["item"]["id"] for c in feed_a}
 
 
 def test_items_filters_and_sort(app, tenants, everest):

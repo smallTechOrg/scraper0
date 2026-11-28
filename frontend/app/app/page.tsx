@@ -29,8 +29,8 @@ export default function OverviewPage() {
         title={`Welcome${user.name ? `, ${user.name.split(" ")[0]}` : ""}`}
         description={`Here's what's happening in ${tenant?.name ?? "your workspace"}.`}
         actions={
-          <ButtonLink href="/app/jobs/new" variant="primary">
-            New job
+          <ButtonLink href="/app/sites" variant="primary">
+            Onboard a site
           </ButtonLink>
         }
       />
@@ -51,10 +51,10 @@ export default function OverviewPage() {
               empty={
                 <EmptyState
                   title="No jobs yet"
-                  description="Crawl a website, upload a poster or run a connector to get your first results."
+                  description="Onboard a site, let scraper0 learn an action and lock it. Learning, refreshes and reads show up here."
                   action={
-                    <ButtonLink href="/app/jobs/new" variant="primary" size="sm">
-                      Create a job
+                    <ButtonLink href="/app/sites" variant="primary" size="sm">
+                      Onboard a site
                     </ButtonLink>
                   }
                 />
@@ -106,10 +106,8 @@ export default function OverviewPage() {
             <CardHeader title="Quick actions" />
             <ul className="divide-y divide-border">
               {[
-                { href: "/app/jobs/new?tab=crawl", label: "Crawl a website", hint: "Extract entities from URLs" },
-                { href: "/app/jobs/new?tab=upload", label: "Upload files", hint: "Posters, PDFs, CSV, ICS or text" },
-                { href: "/app/jobs/new?tab=connector", label: "Run a connector", hint: "Site-specific actions" },
-                { href: "/app/sources", label: "Schedule a source", hint: "Run a crawl on a timer" },
+                { href: "/app/sites", label: "Onboard a site", hint: "Learn an action, check it, lock it" },
+                { href: "/app/sources", label: "Schedule a refresh", hint: "Keep a site action's items fresh" },
                 { href: "/app/items", label: "Browse items", hint: "Stored results and change feed" },
               ].map((a) => (
                 <li key={a.href}>

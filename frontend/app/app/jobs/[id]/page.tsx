@@ -20,7 +20,7 @@ import {
   Stat,
   StatusBadge,
 } from "@/components/ui";
-import { api, type ConnectorResult, type CrawlResult, type Job } from "@/lib/api";
+import { api, type AiResultInfo, type ConnectorResult, type CrawlResult, type Job, type RefreshResult } from "@/lib/api";
 import { cellText, duration, formatDate, jobErrorText, usd } from "@/lib/format";
 import { isTerminal, useLiveJob, type LiveMode } from "@/lib/live-job";
 
@@ -45,6 +45,12 @@ function asCrawlResult(job: Job): CrawlResult | null {
   const r = job.result as Partial<CrawlResult> | null;
   if (!r || typeof r !== "object" || !Array.isArray(r.items)) return null;
   return { ...r, items: r.items, stats: r.stats ?? {} };
+}
+
+function refreshResult(job: Job): RefreshResult | null {
+  if (job.kind !== "site_refresh" || !job.result || typeof job.result !== "object") return null;
+  const r = job.result as Partial<RefreshResult>;
+  return r.site_id && r.stored ? (r as RefreshResult) : null;
 }
 
 function connectorResult(job: Job): ConnectorResult | null {
@@ -130,9 +136,10 @@ export default function JobDetailPage() {
   }
 
   const crawl = asCrawlResult(job);
+  const refresh = refreshResult(job);
   const conn = connectorResult(job);
   const connRows = conn ? connectorRows(conn.data) : null;
-  const ai = crawl?.ai ?? conn?.ai;
+  const ai = crawl?.ai ?? conn?.ai ?? (job.result as { ai?: AiResultInfo } | null)?.ai;
   const stored = crawl?.stored ?? conn?.stored;
   const p = job.progress ?? {};
   const err = jobErrorText(job.error);
@@ -165,6 +172,15 @@ export default function JobDetailPage() {
           <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <Badge>{job.kind}</Badge>
             <span className="font-mono text-xs">{job.id}</span>
+            {job.site_id && (
+              <Link
+                href={`/app/sites/${encodeURIComponent(job.site_id)}${job.action ? `?action=${encodeURIComponent(job.action)}` : ""}`}
+                className="text-xs text-accent hover:underline"
+              >
+                {job.site_id}
+                {job.action ? ` · ${job.action}` : ""}
+              </Link>
+            )}
             {job.source_id && (
               <Link href="/app/sources" className="text-xs text-accent hover:underline">
                 from a scheduled source
@@ -338,6 +354,31 @@ export default function JobDetailPage() {
             <pre className="max-h-96 overflow-auto border-t border-border bg-surface-2 px-4 py-3 font-mono text-xs leading-relaxed">
               {JSON.stringify(conn.data, null, 2)}
             </pre>
+          </Card>
+        )}
+
+        {refresh && (
+          <Card>
+            <CardHeader
+              title="Refresh"
+              description={`Version ${refresh.version} · ${refresh.count} item(s) scraped`}
+              actions={
+                <Link
+                  href={`/app/sites/${encodeURIComponent(refresh.site_id)}?action=${encodeURIComponent(refresh.action)}`}
+                  className="text-sm font-medium text-accent hover:underline"
+                >
+                  Open site items
+                </Link>
+              }
+            />
+            <dl className="grid grid-cols-3 gap-x-6 gap-y-3 px-4 py-4 text-sm sm:px-5">
+              {(["created", "updated", "unchanged"] as const).map((k) => (
+                <div key={k}>
+                  <dt className="text-xs text-subtle">Stored · {k}</dt>
+                  <dd className="font-medium tabular-nums">{refresh.stored[k] ?? 0}</dd>
+                </div>
+              ))}
+            </dl>
           </Card>
         )}
 

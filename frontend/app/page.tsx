@@ -6,20 +6,20 @@ import { ButtonLink, CodeBlock } from "@/components/ui";
 const steps = [
   {
     n: "1",
-    title: "Read once with AI",
-    body: "Point scraper0 at a page. An LLM reads it and extracts the fields of your entity — names, dates, addresses, links.",
+    title: "Onboard the site",
+    body: "Add the site and the action you need, like “fetch events”. scraper0 reads it once — with AI only where it has to — and shows you what it found.",
     visual: "ai",
   },
   {
     n: "2",
-    title: "Learn the layout",
-    body: "It records where each field lives on that kind of page and stores the layout as a reusable recipe for the domain.",
+    title: "Lock what works",
+    body: "It records where each field lives, or the JSON API behind the page. You check the preview and lock it: that version is the contract.",
     visual: "learn",
   },
   {
     n: "3",
-    title: "Scrape the rest without AI",
-    body: "Every similar page is extracted with the recipe — fast, deterministic and free. AI is only used again when a layout changes.",
+    title: "Read it without AI",
+    body: "Every read runs the locked version — fast, deterministic and free. When the site changes, repair re-learns it and you lock again.",
     visual: "fast",
   },
 ] as const;
@@ -34,16 +34,16 @@ const features = [
     body: "A ready-made event entity with date parsing, past/online filtering, de-duplication and address checks.",
   },
   {
-    title: "Uploads",
-    body: "Drop in posters and images, PDFs, CSV, JSON or ICS files, or paste text. Vision models read the flyers for you.",
+    title: "Code connectors",
+    body: "Sites that need logins, forms or a browser get a reviewed connector, onboarded and locked like any learned action.",
   },
   {
-    title: "Site connectors",
-    body: "Purpose-built connectors for sites that need logins, forms or a browser, behind the same job API.",
+    title: "Shared sites",
+    body: "Onboard a site once and every workspace can reuse its actions. Items are stored per site, with stable ids.",
   },
   {
-    title: "Scheduled sources",
-    body: "Save a crawl or connector as a source and run it every 15 minutes or once a week — with history for every run.",
+    title: "Schedules and freshness",
+    body: "Reads return stored items when they are fresh and refresh when they are not. Schedule refreshes from every 15 minutes to weekly.",
   },
   {
     title: "Change feed",
@@ -59,20 +59,16 @@ const features = [
   },
 ];
 
-const curl = `curl -X POST https://scraper0.example.com/v1/jobs \\
+const curl = `curl -X POST https://scraper0.example.com/v2/sites/karmana-in/actions/fetch_events/read \\
   -H "X-API-Key: s0_your_key" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "kind": "crawl",
-    "input": {
-      "entity": "event",
-      "urls": ["https://example.org/whats-on"],
-      "options": { "max_detail_pages": 25, "allow_llm": true, "learn": true }
-    }
+    "options": { "include_online": false, "categories": ["CLEANUP", "TREE_PLANTATION", "OTHER"] },
+    "freshness_hours": 48,
+    "timeout_s": 60
   }'
 
-# → 202 {"data": {"id": "job_…", "status": "queued", …}}
-# then poll GET /v1/jobs/{id} or stream GET /v1/jobs/{id}/events`;
+# → 200 {"data": {"items": [{"id": "itm_…", "updated_at": "…", "data": {…}}], "complete": true, …}}`;
 
 function StepVisual({ kind }: { kind: "ai" | "learn" | "fast" }) {
   // Small schematic illustrations; decorative.
@@ -171,11 +167,11 @@ export default function LandingPage() {
               Invite-only beta
             </p>
             <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl md:text-6xl">
-              Turn any website, poster or spreadsheet into <span className="text-accent">structured data</span>
+              Turn the websites you rely on into <span className="text-accent">structured data</span>
             </h1>
             <p className="mt-6 max-w-2xl text-lg text-muted">
-              scraper0 reads a page once with AI, learns its layout, and then extracts every similar page without AI.
-              Define the entity you need, point it at sources, and get a clean feed of new and changed items over an API.
+              Onboard a site, let scraper0 learn it once, check the result and lock it. From then on every read runs the
+              locked version without AI, and you get a clean feed of new and changed items over an API.
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
               <a
@@ -243,24 +239,24 @@ export default function LandingPage() {
         <section id="api" className="border-y border-border bg-surface py-16 sm:py-20">
           <div className="mx-auto grid max-w-6xl gap-10 px-4 sm:px-6 lg:grid-cols-[1fr_1.4fr] lg:items-center">
             <div>
-              <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">One API for every source</h2>
+              <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">One contract per site action</h2>
               <p className="mt-3 text-muted">
-                Every crawl, upload and connector call is a job. Create one with an API key, stream its progress, then
-                read the results — or subscribe to the change feed and only ever see what&apos;s new.
+                Every onboarded site + locked action is a contract: a site id, an action name and a curl to test it.
+                Read it with an API key, or subscribe to the change feed and only ever see what&apos;s new.
               </p>
               <ul className="mt-5 space-y-2 text-sm text-muted">
                 <li>
-                  <code className="font-mono text-fg">POST /v1/jobs</code> — crawl URLs or run a connector
+                  <code className="font-mono text-fg">POST /v2/sites</code> — onboard a site (dashboard admins)
                 </li>
                 <li>
-                  <code className="font-mono text-fg">POST /v1/jobs/ingest</code> — upload files or text
+                  <code className="font-mono text-fg">POST /v2/sites/{"{site}"}/actions/{"{action}"}/read</code> — read its items
                 </li>
                 <li>
                   <code className="font-mono text-fg">GET /v1/items/changes</code> — new and changed items
                 </li>
               </ul>
             </div>
-            <CodeBlock code={curl} label="Example: create a crawl job with curl" />
+            <CodeBlock code={curl} label="Example: read a locked site action with curl" />
           </div>
         </section>
 

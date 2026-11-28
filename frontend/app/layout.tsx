@@ -4,7 +4,7 @@ import { ConfirmProvider } from "@/components/confirm";
 
 export const metadata: Metadata = {
   title: { default: "scraper0", template: "%s · scraper0" },
-  description: "Turn any website, poster or spreadsheet into structured data.",
+  description: "Onboard the websites you rely on, lock what scraper0 learns, and read structured data over an API.",
 };
 
 export const viewport: Viewport = {

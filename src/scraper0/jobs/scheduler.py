@@ -1,4 +1,5 @@
-"""Sources → jobs. `tick()` is called by Cloud Scheduler (POST /internal/tick) or, locally, by a thread."""
+"""Sources = a tenant's schedules on onboarded site actions → site refreshes. `tick()` is called by Cloud Scheduler
+(POST /internal/tick) or, locally, by a thread."""
 from __future__ import annotations
 
 import threading
@@ -15,23 +16,18 @@ log = structlog.get_logger(__name__)
 MIN_INTERVAL = 15
 
 
-def source_job_input(src_kind: str, config: dict) -> tuple[str, dict]:
-    if src_kind not in ("crawl", "connector"):
-        raise runner.JobInputError("source kind must be crawl or connector")
-    return src_kind, dict(config or {})
-
-
-def run_source(source_id: str) -> str:
+def run_source(source_id: str, force: bool = False) -> str | None:
+    """Refresh the source's site action now (joins a running refresh). → job id, or None when nothing ran
+    (e.g. a broken action inside its hourly retry limit). The next run is scheduled either way."""
+    from scraper0.services import site_calls
     with session_scope() as s:
         src = s.get(Source, source_id)
-        kind, inp = source_job_input(src.kind, src.config)
-        tenant_id = src.tenant_id
-    job_id = runner.submit(tenant_id, kind, inp, source_id=source_id)
-    with session_scope() as s:
-        src = s.get(Source, source_id)
-        src.last_job_id = job_id
-        src.next_run_at = now() + timedelta(minutes=max(src.interval_minutes, MIN_INTERVAL))
-    runner.dispatch(job_id)
+        tenant_id, site_id, action, interval = src.tenant_id, src.site_id, src.action, src.interval_minutes
+        src.next_run_at = now() + timedelta(minutes=max(interval, MIN_INTERVAL))
+    job_id = site_calls.refresh_now(tenant_id, site_id, action, force=force)
+    if job_id:
+        with session_scope() as s:
+            s.get(Source, source_id).last_job_id = job_id
     return job_id
 
 
@@ -61,7 +57,9 @@ def tick() -> dict:
     started = []
     for sid in due:
         try:
-            started.append(run_source(sid))
+            job_id = run_source(sid)
+            if job_id:
+                started.append(job_id)
         except Exception as e:
             log.warning("source_run_failed", source_id=sid, error=str(e))
     if due or stale:

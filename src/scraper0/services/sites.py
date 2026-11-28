@@ -188,7 +188,7 @@ def _actions(s, site_id: str) -> list[SiteAction]:
 def site_summary(s, site: Site, actions: list[SiteAction] | None = None) -> dict:
     actions = actions if actions is not None else _actions(s, site.site_id)
     return {"site_id": site.site_id, "base_url": site.base_url, "name": site.name,
-            "actions": [{"name": a.name, "kind": a.kind, "status": a.status} for a in actions]}
+            "actions": [{"name": a.name, "kind": a.kind, "mode": a.mode, "status": a.status} for a in actions]}
 
 
 def site_public(s, site: Site) -> dict:

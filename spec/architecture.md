@@ -12,7 +12,7 @@
                                                                 │ services/ ai (providers, budget, metering), auth,   │
                                                                 │           items (upsert + change feed), entities    │
                                                                 │ core/     crawler · recipes · llm · fetch · store   │
-                                                                │ events/   event engine, extractors, ingest, dedupe  │
+                                                                │ events/   event engine, extractors, dedupe          │
                                                                 │ connectors/ TEAMEVEREST MYBHARATGOVIN IVOLUNTEERIN  │
                                                                 │            SMARTONEBLR (Playwright) WEBEVENTS       │
                                                                 └───────────────┬────────────────────────────────────┘
@@ -33,7 +33,7 @@
   entities' recipes are private to their tenant (`entity_key = "<tenant_id>:<name>"`).
 - **Connector:** hand-written integration for a site that needs it (login, forms, private API). It exposes named
   actions and gets AI and encrypted state through its context, never directly.
-- **Job:** every scrape is a job (crawl | connector | ingest) with persisted progress events (served as SSE), result,
+- **Job:** every scrape is a job on an onboarded site action (site_learn | site_refresh | site_write; connector internally) with persisted progress events (served as SSE), result,
   cancellation and heartbeat. **Source:** a saved job input plus an interval, run by the scheduler tick.
 - **Item:** a stored result per (tenant, entity, item_key), with first_seen / last_seen / changed_at. Each change appends to
   `item_changes`, and its id is the change-feed cursor.
@@ -70,7 +70,7 @@ at rest. When AI is unavailable, crawls keep their structured and recipe results
 | Constraint | Consequence |
 |---|---|
 | Cloud Run: CPU only while a request is in flight | jobs run inside a request: `wait=true`, the legacy endpoint, or Cloud Tasks → `/internal/jobs/{id}/run` (Tasks' 30-min deadline < the 60-min request timeout; a retry finds the job already claimed) |
-| ephemeral filesystem | connector state (BBMP cookies) and uploads live in the DB; uploads are deleted after the job |
+| ephemeral filesystem | connector state (BBMP cookies) lives in the DB |
 | ≤ 3 DB connections on the shared instance | `max-instances=1`, pool 2+1, every DB use is a short session, never held across network I/O; Postgres `CONNECTION LIMIT 3` |
 | multi-tenant | every query is filtered by tenant; recipe sharing only for built-in entities; portal passwords encrypted in job input and shown as `***` |
 | SSRF | user URLs and every redirect hop must resolve to public IPs; `X-Backend-Url` must be on an allowlist |

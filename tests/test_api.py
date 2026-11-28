@@ -1,5 +1,4 @@
 """End-to-end over HTTP (FastAPI TestClient): auth, tenancy, AI metering, jobs, sources, items, legacy."""
-import io
 import json
 import re
 
@@ -111,6 +110,26 @@ def add_shared_groq(admin):
     return r.json()["data"]
 
 
+def onboard_ex(c: TestClient) -> dict:
+    """Onboard https://ex.org, learn fetch_events from /events, lock version 1 → the learn job."""
+    assert c.post("/v2/sites", json={"base_url": "https://ex.org"}, headers=H).status_code in (200, 201)
+    r = c.post("/v2/sites/ex-org/actions", headers=H, json={"name": "fetch_events", "kind": "read", "entity": "event",
+                                                           "seed_urls": ["https://ex.org/events"]})
+    assert r.status_code == 201, r.text
+    r = c.post("/v2/sites/ex-org/actions/fetch_events/learn", headers=H)
+    assert r.status_code == 202, r.text
+    job = c.get(f"/v1/jobs/{r.json()['data']['job_id']}").json()["data"]
+    assert job["status"] == "succeeded", job
+    assert c.post("/v2/sites/ex-org/actions/fetch_events/versions/1/lock", headers=H).status_code == 200
+    return job
+
+
+def refresh_ex(c: TestClient) -> dict:
+    r = c.post("/v2/sites/ex-org/actions/fetch_events/refresh", headers=H)
+    assert r.status_code == 202, r.text
+    return c.get(f"/v1/jobs/{r.json()['data']['job_id']}").json()["data"]
+
+
 # ------------------------------------------------------------------ public / auth
 
 def test_health_and_meta(app):
@@ -153,10 +172,11 @@ def test_api_keys_and_isolation(app, site, fake_llm):
     key = ann.post("/v1/api-keys", json={"name": "ci"}, headers=H).json()["data"]
     assert key["key"].startswith("s0_")
     k = TestClient(app, headers={"X-API-Key": key["key"]})
-    r = k.post("/v1/jobs", json={"kind": "crawl", "input": {"urls": ["https://ex.org/events"]}, "wait": True})
-    assert r.status_code == 200 and r.json()["data"]["status"] == "succeeded", r.text
-    job_id = r.json()["data"]["id"]
-    assert zed.get(f"/v1/jobs/{job_id}").status_code == 404                      # other tenant can't see it
+    onboard_ex(ann)
+    job = refresh_ex(ann)
+    assert job["status"] == "succeeded" and job["site_id"] == "ex-org" and job["action"] == "fetch_events"
+    assert zed.get(f"/v1/jobs/{job['id']}").status_code == 404                  # other tenant can't see the job
+    assert k.post("/v2/sites/ex-org/actions/fetch_events/refresh").status_code == 403     # service keys can't
     assert k.get("/v1/items").json()["total"] == 2
     shared = zed.get("/v1/items").json()                                         # …but site items are shared
     assert shared["total"] == 2 and {i["site_id"] for i in shared["data"]} == {"ex-org"}
@@ -202,23 +222,21 @@ def test_provider_validation(app):
                                                                  "api_key": "k"}).status_code == 422
 
 
-# ------------------------------------------------------------------ jobs, change feed, SSE, ingest
+# ------------------------------------------------------------------ jobs, change feed, SSE
 
-def test_crawl_job_items_and_change_feed(app, site, fake_llm):
+def test_refresh_items_and_change_feed(app, site, fake_llm):
     admin = login(app)
     ann, _ = onboard(app, admin)
-    def run():
-        return ann.post("/v1/jobs", json={"kind": "crawl", "input": {"urls": ["https://ex.org/events"]}, "wait": True},
-                               headers=H).json()["data"]
-    j = run()
-    assert j["status"] == "succeeded" and j["result"]["stored"] == {"created": 2, "updated": 0, "unchanged": 0}
+    onboard_ex(ann)
+    j = refresh_ex(ann)
+    assert j["kind"] == "site_refresh" and j["status"] == "succeeded"
     feed = ann.get("/v1/items/changes?entity=event").json()
-    assert [c["change"] for c in feed["data"]] == ["created", "created"]
+    assert sorted(c["change"] for c in feed["data"]) == ["created", "created"]
     cursor = feed["next_cursor"]
-    assert run()["result"]["stored"]["unchanged"] == 2
+    assert refresh_ex(ann)["status"] == "succeeded"
     assert ann.get(f"/v1/items/changes?cursor={cursor}").json()["data"] == []        # nothing new
     site["https://ex.org/events/b"] = event_page("Tree Planting", "2026-12-28T07:00:00+05:30")   # date moved
-    assert run()["result"]["stored"]["updated"] == 1
+    refresh_ex(ann)
     ch = ann.get(f"/v1/items/changes?cursor={cursor}").json()["data"]
     assert len(ch) == 1 and ch[0]["change"] == "updated" and ch[0]["item"]["data"]["name"] == "Tree Planting"
     assert ann.get("/v1/items?q=lake").json()["total"] == 1
@@ -227,45 +245,43 @@ def test_crawl_job_items_and_change_feed(app, site, fake_llm):
 def test_sse_stream_and_cancel(app, site, fake_llm, monkeypatch):
     admin = login(app)
     ann, _ = onboard(app, admin)
-    j = ann.post("/v1/jobs", json={"kind": "crawl", "input": {"urls": ["https://ex.org/events"]}, "wait": True},
-                 headers=H).json()["data"]
+    onboard_ex(ann)
+    j = refresh_ex(ann)
     body = ann.get(f"/v1/jobs/{j['id']}/events").text
     assert "event: progress" in body and "event: done" in body and '"succeeded"' in body
     monkeypatch.setattr(get_settings(), "job_mode", "cloud_tasks")
     monkeypatch.setattr("scraper0.jobs.cloud_tasks.enqueue", lambda job_id: None)       # stays queued
-    q = ann.post("/v1/jobs", json={"kind": "crawl", "input": {"urls": ["https://ex.org/events"]}}, headers=H)
-    assert q.status_code == 202 and q.json()["data"]["status"] == "queued"
-    c = ann.post(f"/v1/jobs/{q.json()['data']['id']}/cancel", headers=H).json()["data"]
+    q = ann.post("/v2/sites/ex-org/actions/fetch_events/refresh", headers=H)
+    assert q.status_code == 202
+    qid = q.json()["data"]["job_id"]
+    assert ann.get(f"/v1/jobs/{qid}").json()["data"]["status"] == "queued"
+    again = ann.post("/v2/sites/ex-org/actions/fetch_events/refresh", headers=H).json()["data"]
+    assert again == {"job_id": qid, "joined": True, "visible": True}                    # joins, never doubles
+    c = ann.post(f"/v1/jobs/{qid}/cancel", headers=H).json()["data"]
     assert c["status"] == "cancelled"
 
 
-def test_job_input_validation(app):
+def test_ad_hoc_jobs_and_uploads_are_gone(app):
     admin = login(app)
     ann, _ = onboard(app, admin)
-    bad = [{"kind": "crawl", "input": {"urls": ["ftp://x"]}}, {"kind": "crawl", "input": {"urls": []}},
-           {"kind": "nope", "input": {}}, {"kind": "connector", "input": {}},
-           {"kind": "crawl", "input": {"urls": ["https://x.org"], "entity": "unknown"}}]
-    for b in bad:
-        assert ann.post("/v1/jobs", json=b, headers=H).status_code == 422, b
+    for b in ({"kind": "crawl", "input": {"urls": ["https://x.org"]}}, {"kind": "connector",
+              "input": {"connector": "TEAMEVEREST", "action": "FETCH_EVENTS"}}, {"kind": "ingest", "input": {}},
+              {"kind": "nope"}, {}):
+        r = ann.post("/v1/jobs", json=b, headers=H)
+        assert r.status_code == 422 and "/v2/sites" in r.json()["error"]["message"], b
+    assert ann.post("/v1/jobs/ingest", headers=H, data={"text": "x"}).status_code in (404, 405)
 
 
-def test_ingest_upload_poster(app, fake_llm):
+def test_refresh_now_rules(app, site, fake_llm):
     admin = login(app)
-    add_shared_groq(admin)
     ann, _ = onboard(app, admin)
-    from PIL import Image
-    buf = io.BytesIO()
-    Image.new("RGB", (60, 60), "red").save(buf, "PNG")
-    r = ann.post("/v1/jobs/ingest", headers=H, data={"text": "", "wait": "true"},
-                 files=[("files", ("poster.png", buf.getvalue(), "image/png"))])
-    j = r.json()["data"]
-    assert r.status_code == 200 and j["status"] == "succeeded", r.text
-    assert j["result"]["items"][0]["name"] == "Poster Walk" and j["result"]["stored"]["created"] == 1
-    assert j["result"]["ai"]["calls"] == 1
-    from scraper0.db.models import JobFile
-    from scraper0.db.session import session_scope
-    with session_scope() as s:
-        assert s.query(JobFile).count() == 0                                     # uploads deleted after run
+    assert ann.post("/v2/sites/ex-org/actions/fetch_events/refresh", headers=H).status_code == 404   # not onboarded
+    ann.post("/v2/sites", json={"base_url": "https://ex.org"}, headers=H)
+    ann.post("/v2/sites/ex-org/actions", headers=H, json={"name": "fetch_events", "kind": "read", "entity": "event",
+                                                         "seed_urls": ["https://ex.org/events"]})
+    r = ann.post("/v2/sites/ex-org/actions/fetch_events/refresh", headers=H)
+    assert r.status_code == 404 and r.json()["error"]["code"] == "action_not_available"          # nothing locked
+    assert ann.post("/v2/sites/smartoneblr-com/actions/track_issue/refresh", headers=H).status_code == 422  # lookup
 
 
 # ------------------------------------------------------------------ custom entities + recipes
@@ -293,21 +309,29 @@ def test_custom_entity_versioning_and_private_recipes(app):
 def test_sources_and_tick(app, site, fake_llm, monkeypatch):
     admin = login(app)
     ann, _ = onboard(app, admin)
-    bad = ann.post("/v1/sources", headers=H, json={"name": "x", "kind": "crawl", "config": {"urls": ["https://ex.org"]},
-                                                   "interval_minutes": 5})
+    r = ann.post("/v1/sources", headers=H, json={"name": "x", "site_id": "ex-org", "interval_minutes": 60})
+    assert r.status_code == 404 and r.json()["error"]["code"] == "site_not_onboarded"
+    onboard_ex(ann)
+    bad = ann.post("/v1/sources", headers=H, json={"name": "x", "site_id": "ex-org", "interval_minutes": 5})
     assert bad.status_code == 422
-    src = ann.post("/v1/sources", headers=H, json={"name": "Ex events", "kind": "crawl",
-                                                   "config": {"urls": ["https://ex.org/events"]}, "interval_minutes": 60})
-    assert src.status_code == 201
+    lookup = ann.post("/v1/sources", headers=H, json={"name": "x", "site_id": "smartoneblr-com",
+                                                      "action": "track_issue", "interval_minutes": 60})
+    assert lookup.status_code == 422                                              # only list actions
+    src = ann.post("/v1/sources", headers=H, json={"name": "Ex events", "site_id": "ex-org", "interval_minutes": 60})
+    assert src.status_code == 201, src.text
+    assert src.json()["data"]["action"] == "fetch_events"
     internal = TestClient(app)
     assert internal.post("/internal/tick").status_code == 401
     t = internal.post("/internal/tick", headers={"Authorization": "Bearer internal-secret-token"}).json()["data"]
     assert t["due"] == 1 and len(t["started"]) == 1
     s = ann.get("/v1/sources").json()["data"][0]
-    assert s["last_job"]["status"] == "succeeded" and s["next_run_at"]
+    assert s["last_job"]["status"] == "succeeded" and s["last_job"]["kind"] == "site_refresh" and s["next_run_at"]
     t2 = internal.post("/internal/tick", headers={"Authorization": "Bearer internal-secret-token"}).json()["data"]
     assert t2["due"] == 0                                                         # not due again for an hour
     assert ann.get("/v1/items").json()["data"][0]["job_id"] == s["last_job"]["id"]
+    run = ann.post(f"/v1/sources/{s['id']}/run", headers=H)
+    assert run.status_code == 202 and run.json()["data"]["kind"] == "site_refresh"
+    assert ann.patch(f"/v1/sources/{s['id']}", headers=H, json={"enabled": False}).json()["data"]["enabled"] is False
 
 
 # ------------------------------------------------------------------ legacy /api/v1/scrape
@@ -366,14 +390,13 @@ def test_internal_run_requires_token(app):
 
 
 def test_ai_unavailable_is_reported_not_silent(app, site):
-    """No provider configured: structured-data crawl still succeeds, and the result says AI was unavailable."""
+    """No provider configured: learning from structured data still succeeds, and the job says AI was unavailable."""
     admin = login(app)
     ann, _ = onboard(app, admin)
     site["https://ex.org/events/c"] = "<html><body><h2>Plain page</h2><p>" + "words " * 40 + "</p></body></html>"
     site["https://ex.org/events"] = site["https://ex.org/events"].replace("</body>", '<a href="/events/c">c</a></body>')
-    j = ann.post("/v1/jobs", json={"kind": "crawl", "input": {"urls": ["https://ex.org/events"]}, "wait": True},
-                 headers=H).json()["data"]
-    assert j["status"] == "succeeded" and len(j["result"]["items"]) == 2
+    j = onboard_ex(ann)
+    assert j["result"]["preview"]["count"] == 2
     assert any("no AI provider" in e for e in j["result"]["ai"]["errors"])
 
 
@@ -382,9 +405,11 @@ def test_listing_events_without_urls_do_not_overwrite_each_other(app):
     evs = [{"name": "A", "start_time": "2099-12-01T04:30:00.000Z", "link": "https://ex.org/events"},
            {"name": "B", "start_time": "2099-12-02T04:30:00.000Z", "link": "https://ex.org/events"},
            {"name": "B", "start_time": "2099-12-02T04:30:00.000Z", "link": "https://ex.org/events"}]
-    seeds = ["https://ex.org/events"]
-    assert store_run_items("t1", "event", evs, seeds=seeds) == {"created": 2, "updated": 0, "unchanged": 0}
-    assert store_run_items("t1", "event", evs, seeds=seeds)["unchanged"] == 2    # keys stable across runs
+    site = ("ex-org", "fetch_events")
+    assert store_run_items("t1", "event", evs, site=site) == {"created": 2, "updated": 0, "unchanged": 0}
+    assert store_run_items("t1", "event", evs, site=site)["unchanged"] == 2      # keys stable across runs
+    assert store_run_items("t1", "event", [{"name": "C", "start_time": "2099-12-03T04:30:00.000Z"}]) == \
+        {"created": 0, "updated": 0, "unchanged": 0}                            # no site → not stored
 
 
 def test_change_password(app):
@@ -401,18 +426,13 @@ def test_change_password(app):
     login(app, pw="brand-new-password")
 
 
-def test_sse_accepts_tenant_query_param_and_sources_reject_credentials(app, site, fake_llm):
+def test_sse_accepts_tenant_query_param(app, site, fake_llm):
     admin = login(app)
     ann, _ = onboard(app, admin, "acme")
     zed, _ = onboard(app, admin, "zed")
     tid = zed.get("/v1/tenant").json()["data"]["id"]
-    j = zed.post("/v1/jobs", json={"kind": "crawl", "input": {"urls": ["https://ex.org/events"]}, "wait": True},
-                 headers=H).json()["data"]
+    onboard_ex(zed)
+    j = refresh_ex(zed)
     # platform admin (no memberships) streams another tenant's job via ?tenant= (EventSource can't set headers)
     assert "event: done" in admin.get(f"/v1/jobs/{j['id']}/events?tenant={tid}").text
     assert ann.get(f"/v1/jobs/{j['id']}/events?tenant={tid}").status_code == 403      # not a member
-    r = ann.post("/v1/sources", headers=H, json={"name": "x", "kind": "connector", "interval_minutes": 60,
-                                                 "config": {"connector": "WEBEVENTS", "action": "FETCH_EVENTS",
-                                                            "data": {"urls": ["https://ex.org"]},
-                                                            "auth": {"username": "u", "password": "p"}}})
-    assert r.status_code == 422 and "credentials" in r.json()["error"]["message"]

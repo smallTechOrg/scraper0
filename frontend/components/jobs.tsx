@@ -9,6 +9,14 @@ import { Badge, StatusBadge, Table, Td, Th } from "./ui";
 export function describeJob(job: Pick<Job, "kind"> & { input?: unknown }): string {
   const input = (job.input ?? null) as Record<string, unknown> | null;
   if (!input || typeof input !== "object") return job.kind;
+  if (job.kind.startsWith("site_")) {
+    const verbs: Record<string, string> = { site_refresh: "refresh", site_learn: "learn", site_write: "write" };
+    const verb = verbs[job.kind] ?? job.kind;
+    return `${String(input.site_id ?? "site")} · ${String(input.action ?? "")} · ${verb}`;
+  }
+  if (job.kind === "connector" && input.site_id) {
+    return `${String(input.site_id)} · ${String(input.site_action ?? input.action ?? "")} · lookup`;
+  }
   if (job.kind === "crawl") {
     const entity = typeof input.entity === "string" ? input.entity : (input.entity as { name?: string })?.name;
     const urls = Array.isArray(input.urls) ? (input.urls as string[]) : [];
@@ -45,6 +53,12 @@ export function JobsTable({ jobs, compact = false }: { jobs: JobSummary[]; compa
               </Link>
               <div className="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
                 <Badge>{j.kind}</Badge>
+                {j.site_id && (
+                  <Link href={`/app/sites/${encodeURIComponent(j.site_id)}${j.action ? `?action=${encodeURIComponent(j.action)}` : ""}`}
+                        className="hover:text-accent hover:underline">
+                    {j.site_id}
+                  </Link>
+                )}
                 {j.source_id && <span>scheduled</span>}
                 <span className="font-mono">{j.id.slice(0, 10)}</span>
               </div>

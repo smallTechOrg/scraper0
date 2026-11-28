@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { JobsTable } from "@/components/jobs";
 import { Alert, Button, ButtonLink, Card, DataView, EmptyState, PageHeader, Select } from "@/components/ui";
-import { api, errorMessage, JOB_STATUSES, type JobSummary } from "@/lib/api";
+import { api, errorMessage, JOB_KINDS, JOB_STATUSES, type JobSummary } from "@/lib/api";
 import { useAsync } from "@/lib/hooks";
 
 const PAGE = 50;
@@ -44,10 +44,10 @@ export default function JobsPage() {
     <>
       <PageHeader
         title="Jobs"
-        description="Every crawl, upload and connector run is a job."
+        description="History of every run: learning and repairing site actions, refreshes (reads, Refresh now, schedules) and writes. To scrape something, onboard its site."
         actions={
-          <ButtonLink href="/app/jobs/new" variant="primary">
-            New job
+          <ButtonLink href="/app/sites" variant="primary">
+            Sites
           </ButtonLink>
         }
       />
@@ -72,9 +72,11 @@ export default function JobsPage() {
             </label>
             <Select id="kind-filter" value={kind} onChange={(e) => setKind(e.target.value)} className="h-9 w-40">
               <option value="">All kinds</option>
-              <option value="crawl">crawl</option>
-              <option value="connector">connector</option>
-              <option value="ingest">ingest</option>
+              {JOB_KINDS.map((k) => (
+                <option key={k} value={k}>
+                  {k.replace("site_", "")}
+                </option>
+              ))}
             </Select>
           </div>
           <Button size="sm" variant="ghost" className="ml-auto" onClick={jobs.reload} loading={jobs.loading}>
@@ -86,11 +88,15 @@ export default function JobsPage() {
           empty={
             <EmptyState
               title={status || kind ? "No jobs match these filters" : "No jobs yet"}
-              description={status || kind ? "Try a different status or kind." : "Create a job to start extracting data."}
+              description={
+                status || kind
+                  ? "Try a different status or kind."
+                  : "Jobs appear when a site action is learned, refreshed or read past its freshness."
+              }
               action={
                 !(status || kind) && (
-                  <ButtonLink href="/app/jobs/new" variant="primary" size="sm">
-                    New job
+                  <ButtonLink href="/app/sites" variant="primary" size="sm">
+                    Onboard a site
                   </ButtonLink>
                 )
               }

@@ -1,35 +1,24 @@
-"""Jobs (incl. uploads and live progress), scheduled sources, stored items + change feed."""
+"""Jobs (history + live progress), scheduled sources (schedules on site actions), stored items + change feed."""
 from __future__ import annotations
 
 import json
 import time
 from datetime import datetime
 
-from fastapi import APIRouter, Body, File, Form, Request, Response, UploadFile
+from fastapi import APIRouter, Body, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from scraper0.api.deps import APIError, require_admin, resolve
-from scraper0.config import get_settings
 from scraper0.db.models import Job, JobEvent, Source, now
 from scraper0.db.session import session_scope
 from scraper0.jobs import runner, scheduler
 from scraper0.services import entities as entity_svc
 from scraper0.services import items as item_svc
+from scraper0.services.sites import SiteError
 
 router = APIRouter(prefix="/v1")
-MAX_FILES = 10
 SSE_MAX_S = 55 * 60
-
-
-def _start(job_id: str, wait: bool) -> tuple[dict, int]:
-    if wait:
-        runner.run_job(job_id)      # runs inside this request: CPU stays allocated on Cloud Run
-        with session_scope() as s:
-            return runner.job_public(s.get(Job, job_id)), 200
-    runner.dispatch(job_id)
-    with session_scope() as s:
-        return runner.job_public(s.get(Job, job_id)), 202
 
 
 def _own_job(s, tenant_id: str, job_id: str) -> Job:
@@ -40,51 +29,14 @@ def _own_job(s, tenant_id: str, job_id: str) -> Job:
 
 
 @router.post("/jobs")
-def create_job(request: Request, response: Response, body: dict = Body(...)):
-    p = resolve(request)
-    kind, inp = body.get("kind"), body.get("input") or {}
-    if kind == "ingest":
-        raise APIError(422, "invalid_input", "use POST /v1/jobs/ingest (multipart) for uploads")
-    if kind == "crawl":
-        try:
-            entity_svc.resolve(p.tenant_id, inp.get("entity", "event"))
-        except (ValueError, TypeError, KeyError) as e:
-            raise APIError(422, "invalid_entity", str(e))
-    try:
-        job_id = runner.submit(p.tenant_id, kind, inp)
-    except runner.JobInputError as e:
-        raise APIError(422, "invalid_input", str(e))
-    data, status = _start(job_id, bool(body.get("wait")))
-    response.status_code = status
-    return {"data": data}
-
-
-@router.post("/jobs/ingest")
-async def ingest_job(request: Request, response: Response, files: list[UploadFile] = File(default=[]),
-                     text: str = Form(default=""), urls: str = Form(default=""), portal: str = Form(default="ADMIN"),
-                     wait: bool = Form(default=False)):
-    from starlette.concurrency import run_in_threadpool
-    p = await run_in_threadpool(resolve, request)
-    if len(files) > MAX_FILES:
-        raise APIError(413, "too_many_files", f"max {MAX_FILES} files")
-    cap = get_settings().max_upload_mb * 1024 * 1024
-    blobs, total = [], 0
-    for f in files:
-        data = await f.read()
-        total += len(data)
-        if total > cap:
-            raise APIError(413, "too_large", f"uploads exceed {get_settings().max_upload_mb} MB")
-        blobs.append((f.filename or "upload", data))
-    import re
-    url_list = [u for u in re.split(r"[\s,]+", urls or "") if u.startswith(("http://", "https://"))][:10]
-    try:
-        job_id = await run_in_threadpool(runner.submit, p.tenant_id, "ingest",
-                                         {"text": text, "urls": url_list, "portal": portal}, None, blobs)
-    except runner.JobInputError as e:
-        raise APIError(422, "invalid_input", str(e))
-    data, status = await run_in_threadpool(_start, job_id, wait)
-    response.status_code = status
-    return {"data": data}
+def create_job(request: Request, body: dict | None = Body(None)):
+    """Ad-hoc jobs (crawl a URL, run a connector, upload a file) are gone: every scrape runs through an
+    onboarded site and its locked action."""
+    resolve(request)
+    raise APIError(422, "invalid_input",
+                   "ad-hoc jobs are not supported: onboard the site (POST /v2/sites), lock an action, then read it "
+                   "(POST /v2/sites/{site_id}/actions/{name}/read) or refresh it "
+                   "(POST /v2/sites/{site_id}/actions/{name}/refresh)")
 
 
 @router.get("/jobs")
@@ -164,37 +116,37 @@ def job_events(job_id: str, request: Request):
 
 def _source(s, src: Source) -> dict:
     last = s.get(Job, src.last_job_id) if src.last_job_id else None
-    return {"id": src.id, "name": src.name, "kind": src.kind, "config": src.config,
+    if last is not None and last.tenant_id != src.tenant_id:     # joined another tenant's refresh: status only
+        last_view = {"id": None, "kind": last.kind, "status": last.status,
+                     "finished_at": last.finished_at.isoformat() if last.finished_at else None}
+    else:
+        last_view = runner.job_public(last, include_result=False) if last else None
+    return {"id": src.id, "name": src.name, "site_id": src.site_id, "action": src.action,
             "interval_minutes": src.interval_minutes, "enabled": src.enabled,
             "next_run_at": src.next_run_at.isoformat() if src.next_run_at else None,
-            "last_job": runner.job_public(last, include_result=False) if last else None,
-            "created_at": src.created_at.isoformat()}
+            "last_job": last_view, "created_at": src.created_at.isoformat()}
 
 
 def _check_source(p, body: dict, partial: bool) -> dict:
+    from scraper0.services import sites as sites_svc
     out = {}
     if not partial or "name" in body:
         name = str(body.get("name") or "").strip()
         if not name:
             raise APIError(422, "invalid_input", "name is required")
         out["name"] = name[:200]
-    if not partial or "kind" in body or "config" in body:
-        kind, cfg = body.get("kind"), body.get("config") or {}
-        try:
-            k, inp = scheduler.source_job_input(kind, cfg)
-            runner._validate(k, dict(inp), None)
-            if k == "crawl":
-                entity_svc.resolve(p.tenant_id, inp.get("entity", "event"))
-            if k == "connector":
-                from scraper0.connectors.base import get
-                c = get(inp["connector"])
-                if c is None or inp["action"] not in c.actions:
-                    raise runner.JobInputError("unknown connector/action")
-            if inp.get("auth"):
-                raise runner.JobInputError("sources cannot store portal credentials; run that connector as a job")
-        except (runner.JobInputError, ValueError) as e:
-            raise APIError(422, "invalid_input", str(e))
-        out["kind"], out["config"] = kind, cfg
+    if not partial or "site_id" in body or "action" in body:
+        site_id, action = str(body.get("site_id") or "").strip(), str(body.get("action") or "fetch_events").strip()
+        if not site_id:
+            raise APIError(422, "invalid_input", "site_id is required (an onboarded site)")
+        with session_scope() as s:
+            try:
+                a, _v = sites_svc.get_locked(s, site_id, action)
+            except sites_svc.SiteError as e:
+                raise APIError(e.status, e.code, e.message, e.extra) from None
+            if a.mode != "list":
+                raise APIError(422, "invalid_input", f"{action} is a {a.mode} action; schedules refresh list actions")
+        out["site_id"], out["action"] = site_id, action
     if "interval_minutes" in body or not partial:
         try:
             iv = int(body.get("interval_minutes", 1440))
@@ -261,9 +213,18 @@ def run_source(sid: str, request: Request):
     p = resolve(request)
     with session_scope() as s:
         _own_source(s, p, sid)
-    job_id = scheduler.run_source(sid)
+    require_admin(p, allow_service=True)
+    try:
+        job_id = scheduler.run_source(sid, force=True)
+    except SiteError as e:
+        raise APIError(e.status, e.code, e.message, e.extra) from None
+    if job_id is None:
+        raise APIError(503, "dispatch_failed", "the refresh could not be started; try again")
     with session_scope() as s:
-        return {"data": runner.job_public(s.get(Job, job_id))}
+        j = s.get(Job, job_id)
+        if j is None or j.tenant_id != p.tenant_id:
+            return {"data": {"id": None, "kind": "site_refresh", "status": j.status if j else "queued"}}
+        return {"data": runner.job_public(j)}
 
 
 # ------------------------------------------------------------------ items + change feed

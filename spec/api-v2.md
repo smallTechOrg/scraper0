@@ -1,5 +1,8 @@
 # scraper0 API v2: sites and actions (build contract)
 
+**Onboarding only (v0.3):** this is the only way to scrape. There are no ad-hoc crawl, connector or upload jobs
+(`POST /v1/jobs` → 422); every site is onboarded, every action learned (or a code connector) and locked first.
+
 The exact contract that the scraper0 implementation, the scraper0 dashboard, hashtaglocal-backend and the hashtaglocal Ops UI
 are built against. The concepts and rationale are in [sites-and-actions.md](sites-and-actions.md). v1 endpoints
 (spec/api.md), including the legacy `POST /api/v1/scrape`, stay unchanged.
@@ -19,7 +22,7 @@ POST /v2/sites      (tenant admin)         {"base_url": "https://karmana.in/anyt
      → 201 {"data": Site, "existing": false} | 200 {"data": Site, "existing": true}
 GET  /v2/sites/{site_id}                   → {"data": Site}                                    | 404 site_not_onboarded
 
-SiteSummary = {site_id, base_url, name, actions: [{name, kind, status}]}
+SiteSummary = {site_id, base_url, name, actions: [{name, kind, mode: "list"|"lookup"|"write", status}]}
 Site        = SiteSummary + {created_at, created_by_tenant, actions: [Action]}
 ```
 
@@ -40,6 +43,10 @@ POST /v2/sites/{site_id}/actions/{name}/versions/{n}/lock   (tenant admin)
      → {"data": Contract}        Exactly one locked version per action; the previously locked one becomes "retired".
 POST /v2/sites/{site_id}/actions/{name}/repair      (tenant admin)  → 202 {"data": {"job_id", "version": n}}
      Same as learn, but for a broken action. The new draft must be locked to take effect.
+POST /v2/sites/{site_id}/actions/{name}/refresh     (tenant admin)  → 202 {"data": {"job_id", "joined": bool, "visible": bool}}
+     Refresh the locked version now, ignoring freshness (the dashboard's "Refresh now"; schedules use it too). Joins a
+     refresh already running for this site + action (`joined`). `visible`: the job belongs to your tenant, so
+     GET /v1/jobs/{id} shows it. 404 site_not_onboarded | 404 action_not_available | 422 (not a list action).
 GET  /v2/sites/{site_id}/actions/{name}/contract    → {"data": Contract}                     | 404 action_not_available
 
 Action   = {site_id, name, kind: "read"|"write", entity, implementation: "learned"|"code",
@@ -98,8 +105,8 @@ latitude, longitude, is_online, price, source_url}`, where times are ISO-8601 UT
 caller's `categories`, or `null` when none were sent.
 
 - **Shared store:** items are stored per (site, action), not per tenant, in the one `items` table (v1 `/v1/items`
-  lists the same rows). Every tenant reading a site sees the same items, and v1 jobs on the site (crawl, connector)
-  update them too. A read returns the items seen by the last successful v2 refresh only. Item `id` = `itm_` + the first 24 hex characters of sha256(site_id | action | item_key), where `item_key` is the canonical link,
+  lists the same rows). Every tenant reading a site sees the same items, and code connector runs on the site
+  (e.g. the legacy `/api/v1/scrape`) update them too. A read returns the items seen by the last successful v2 refresh only. Item `id` = `itm_` + the first 24 hex characters of sha256(site_id | action | item_key), where `item_key` is the canonical link,
   or link + `#` + identity hash when several items share a link. It is stable for the life of the item. `updated_at`
   changes only when the item's content changes.
 - **Filtering per request:** `from`, `include_online`, then the AI filter and categories. AI verdicts are cached in

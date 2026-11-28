@@ -94,6 +94,77 @@ function jobItems(job: Job): Array<Record<string, unknown>> | null {
 // Live learn / repair progress
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Refresh now: run the locked version against the live site, with live progress
+// ---------------------------------------------------------------------------
+
+function RefreshProgress({ jobId, onFinished, onDismiss }: { jobId: string; onFinished: (job: Job) => void; onDismiss: () => void }) {
+  const { job, error, logs, mode } = useLiveJob(jobId);
+  const done = useRef(false);
+  const onFinishedRef = useRef(onFinished);
+  useEffect(() => {
+    onFinishedRef.current = onFinished;
+  });
+  useEffect(() => {
+    if (job && isTerminal(job) && !done.current) {
+      done.current = true;
+      onFinishedRef.current(job);
+    }
+  }, [job]);
+
+  const p = job?.progress ?? {};
+  const finished = job && isTerminal(job);
+  const stored = (job?.result as { stored?: { created: number; updated: number; unchanged: number } } | null)?.stored;
+  const err = job ? jobErrorText(job.error) : null;
+  return (
+    <Card>
+      <CardHeader
+        title={
+          <span className="flex flex-wrap items-center gap-2">
+            Refresh {job && <StatusBadge status={job.status} />}
+          </span>
+        }
+        description={
+          <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <LiveIndicator mode={mode} />
+            <JobLink id={jobId}>Job details</JobLink>
+          </span>
+        }
+        actions={
+          finished ? (
+            <Button size="sm" onClick={onDismiss}>
+              Dismiss
+            </Button>
+          ) : undefined
+        }
+      />
+      <div className="space-y-3 px-4 py-4 sm:px-5">
+        {error && !job ? <ErrorState error={error} /> : null}
+        {!finished && (
+          <div className="h-1.5 overflow-hidden rounded-full bg-surface-2" aria-hidden>
+            <div className="h-full w-1/3 animate-pulse rounded-full bg-accent" />
+          </div>
+        )}
+        <p className="text-sm">
+          {job?.status === "succeeded" && stored
+            ? `Done: ${stored.created} new, ${stored.updated} updated, ${stored.unchanged} unchanged.`
+            : (p.message ?? (job?.status === "queued" ? "Waiting for a worker…" : "Scraping the live site with the locked version…"))}
+        </p>
+        {finished && job.status !== "succeeded" && err && <Alert>{err}</Alert>}
+        {!finished && logs.length > 0 && (
+          <div className="rounded-md border border-border bg-surface-2 px-3 py-2 font-mono text-xs leading-relaxed" role="log" aria-live="polite">
+            {logs.slice(-5).map((l) => (
+              <div key={l.id} className={l.level === "error" ? "text-danger" : ""}>
+                <span className="text-subtle">{new Date(l.at).toLocaleTimeString()}</span> {l.message}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 function JobProgress({
   run,
   onSucceeded,
@@ -706,6 +777,10 @@ export function ActionPanel({
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [tab, setTab] = useState<PanelTab>("versions");
+  const [refreshJob, setRefreshJob] = useState<string | null>(null);
+  const [refreshNote, setRefreshNote] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [itemsKey, setItemsKey] = useState(0);
 
   const write = action.kind === "write";
   const learned = action.implementation === "learned";
@@ -713,6 +788,22 @@ export function ActionPanel({
   const canMutate = canAdmin && !write;
   const canLearn = learned && !write;
   const hasItems = !write && !isLookup(action);          // list reads store items; lookups and writes don't
+  const canRefresh = canAdmin && hasItems && action.locked_version !== null;
+
+  async function refreshNow() {
+    setRefreshing(true);
+    setStartError(null);
+    setRefreshNote(null);
+    try {
+      const res = await sitesApi.refresh(site.site_id, action.name);
+      if (res.visible) setRefreshJob(res.job_id);
+      else setRefreshNote("Joined a refresh another workspace already started. Its results land in this action's items.");
+    } catch (err) {
+      setStartError(errorMessage(err));
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   const setRun = useCallback(
     (r: RunState | null) => {
@@ -815,14 +906,19 @@ export function ActionPanel({
           }
           description={action.entity ? `Entity: ${action.entity}` : undefined}
           actions={
-            canMutate && !run ? (
+            (canMutate && !run) || canRefresh ? (
               <>
-                {canLearn && (
+                {canRefresh && (
+                  <Button variant="primary" onClick={refreshNow} loading={refreshing} disabled={refreshing || !!refreshJob}>
+                    Refresh now
+                  </Button>
+                )}
+                {canMutate && !run && canLearn && (
                   <Button onClick={() => start("learn")} loading={starting} disabled={starting}>
                     {(versions.data?.length ?? 0) > 0 ? "Learn again" : "Learn"}
                   </Button>
                 )}
-                {broken && (
+                {canMutate && !run && broken && (
                   <Button variant="danger" onClick={() => start("repair")} loading={starting} disabled={starting}>
                     Repair
                   </Button>
@@ -854,6 +950,7 @@ export function ActionPanel({
             </Alert>
           )}
           {startError && <Alert>{startError}</Alert>}
+          {refreshNote && <Alert tone="accent">{refreshNote}</Alert>}
           <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm md:grid-cols-4">
             <div>
               <dt className="text-xs text-subtle">Locked version</dt>
@@ -890,6 +987,18 @@ export function ActionPanel({
           )}
         </div>
       </Card>
+
+      {refreshJob && (
+        <RefreshProgress
+          key={refreshJob}
+          jobId={refreshJob}
+          onFinished={() => {
+            setItemsKey((k) => k + 1);
+            onChanged();
+          }}
+          onDismiss={() => setRefreshJob(null)}
+        />
+      )}
 
       {run && (
         <JobProgress
@@ -941,7 +1050,7 @@ export function ActionPanel({
 
       {hasItems && tab === "items" && (
         <div role="tabpanel" id="action-tabpanel-items" aria-labelledby="action-tab-items">
-          <ActionItemsCard site={site} action={action} />
+          <ActionItemsCard key={itemsKey} site={site} action={action} />
         </div>
       )}
     </div>

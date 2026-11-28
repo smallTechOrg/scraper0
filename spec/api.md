@@ -1,6 +1,6 @@
 # scraper0 HTTP API (v0.1)
 
-JSON everywhere, apart from multipart uploads and SSE streams. Times are ISO-8601 UTC. Errors use the shape
+JSON everywhere, apart from SSE streams. Times are ISO-8601 UTC. Errors use the shape
 `{"error": {"code": "snake_case", "message": "human text"}}` with 400 / 401 / 403 / 404 / 409 / 413 / 422 / 429 / 502 status codes.
 The one exception is the legacy endpoint, which keeps its old error shape (see below).
 
@@ -72,50 +72,49 @@ Recipe = {id, domain, path_pattern, entity, rules, sample_url, successes, failur
 GET    /v1/connectors                     → {"data": [{name, source, description, actions, needs_browser}]}
 ```
 
-## Jobs
+## Jobs (history)
 
-Every scrape runs as a job: crawl, connector action or ingest.
+There are no ad-hoc jobs. Every scrape runs through an onboarded site and its locked action (v2,
+[api-v2.md](api-v2.md)): learning and repair (`site_learn`), refreshes (`site_refresh`: a read past its freshness,
+`POST …/refresh`, a schedule) and writes (`site_write`). `connector` jobs run a code connector for a v2 lookup or
+the legacy `/api/v1/scrape`. Older `crawl` / `ingest` jobs stay as read-only history.
 
 ```
-POST /v1/jobs                {kind, input, wait?: bool}   → 202 {"data": Job}     (wait=true: blocks until done, ≤ 55 min, → 200)
-     kind=crawl      input = {entity: name | inline spec, urls: [..≤20], options?: {max_detail_pages, max_list_pages, allow_llm, learn, use_cache,
-                                event_filter?, category_filter?, include_past?, include_online?, require_address?, portal?}}
-     kind=connector  input = {connector, action, data, auth?}
-POST /v1/jobs/ingest         multipart: files[] (≤10), text?, urls?, entity? (default event), portal?, wait?  → 202/200 {"data": Job}
+POST /v1/jobs                → 422 invalid_input (points to POST /v2/sites …). Uploads (/v1/jobs/ingest) are gone.
 GET  /v1/jobs?status=&kind=&limit=50&before=<created_at>  → {"data": [JobSummary]}
 GET  /v1/jobs/{id}           → {"data": Job}
 GET  /v1/jobs/{id}/events    → text/event-stream; events: `progress` {message, ...}, `log`, `done` {status}; resumes with Last-Event-ID
 POST /v1/jobs/{id}/cancel    → {"data": Job}   (cooperative; running jobs stop at the next page)
 Job = {id, kind, status, input, result, error, progress: {message, pages, items, llm_calls, recipes_learned}, source_id,
-       created_at, started_at, finished_at}
+       site_id, action, created_at, started_at, finished_at}
+kind ∈ site_refresh | site_learn | site_write | connector   (history may also hold crawl | ingest)
 status ∈ queued | running | succeeded | failed | cancelled
-result (crawl/ingest) = {entity, items: [...], stats: {...}, stored: {created, updated, unchanged}, ai: {calls, cost_usd, errors: [..]}}
-                        ingest adds report: [{input, events, error}] and needs_review
+result (site_refresh) = {site_id, action, version, count, stored: {created, updated, unchanged}, ai}
+result (site_learn)   = {site_id, action, version, preview, implementation_snapshot, ai}
 result (connector)    = {data: <connector payload>, stored?: {...}, ai: {...}}
-crawl options also accept link_pattern (regex on URL paths of detail pages) for non-event entities
 ```
 
-## Sources (scheduled jobs)
+## Sources (schedules on site actions)
 
 ```
 GET    /v1/sources                        → {"data": [Source]}
-POST   /v1/sources         (admin)        {name, kind: crawl|connector, config (= job input), interval_minutes ≥ 15, enabled?} → 201
+POST   /v1/sources         (admin)        {name, site_id, action (default fetch_events), interval_minutes ≥ 15, enabled?} → 201
+                                           404 site_not_onboarded | 404 action_not_available (nothing locked) | 422 (not a list action)
 PATCH  /v1/sources/{id}    (admin)        → 200
 DELETE /v1/sources/{id}    (admin)        → 204
-POST   /v1/sources/{id}/run               → 202 {"data": Job}
-Source = {id, name, kind, config, interval_minutes, enabled, next_run_at, last_job: JobSummary|null}
+POST   /v1/sources/{id}/run (admin)       → 202 {"data": Job}   (refresh now; a joined refresh of another tenant → {id: null, kind, status})
+Source = {id, name, site_id, action, interval_minutes, enabled, next_run_at, last_job: JobSummary|null}
 ```
+The tick refreshes due schedules (joining a running refresh; a broken action keeps its hourly retry limit).
 
 ## Stored results and change feed
 
-There is one item store, shared through sites (migration `0004`):
+There is one item store, shared through sites (migrations `0004`, `0006`):
 
-- **Site items** belong to a site + action (`fetch_events` for events, `fetch_<entity>` otherwise) and are shared by
-  every tenant. Every run that scrapes the site updates the same rows, whoever starts it: v2 refreshes, v1 crawl
-  jobs (site = the seed URL's host; a site seen for the first time is registered with no actions, which is not
-  onboarding) and connector jobs (the site of the connector's code action, e.g. TEAMEVEREST → `teameverest-ngo`).
-  Item `id` = `itm_` + sha256(site_id | action | item_key)[:24], the same id v2 reads return.
-- **Private items** (uploads and text ingest, and items of tenant-defined entities) are visible to their tenant only.
+- **Every item belongs to a site + action** and is shared by every tenant. Every run that scrapes the site updates
+  the same rows, whoever starts it: v2 refreshes and code connector runs (the site of the connector's code action,
+  e.g. TEAMEVEREST → `teameverest-ngo`). Item `id` = `itm_` + sha256(site_id | action | item_key)[:24], the same id
+  v2 reads return. (Private items — uploads — were removed in `0006`.)
 - Each run bumps `last_seen_at` on every item it saw; `updated_at` moves only when the content changed (the image URL
   is not content). No versions are kept.
 
@@ -123,10 +122,10 @@ There is one item store, shared through sites (migration `0004`):
 GET /v1/items?entity=&site=&action=&q=&sort=last_seen|updated|first_seen&limit=50&offset=0  → {"data": [Item], "total"}
 GET /v1/items/sites                                       → {"data": [{site_id, items}]}   (sites holding visible items)
 GET /v1/items/changes?entity=event&cursor=0&limit=500     → {"data": [{change: created|updated, item: Item}], "next_cursor": int, "has_more": bool}
-Item = {id: "itm_…", entity, item_key, data, site_id, action, private, job_id, first_seen_at, last_seen_at,
+Item = {id: "itm_…", entity, item_key, data, site_id, action, private (always false), job_id, first_seen_at, last_seen_at,
         updated_at, changed_at (= updated_at)}
 ```
-A tenant sees all site items plus its own private items, in both the list and the change feed. Consumers store
+Every tenant sees the same items, in both the list and the change feed. Consumers store
 `next_cursor` and pass it back as `cursor`, so they only ever see new or changed items. (`0004` restarted the feed:
 cursors from before it are not valid.) `source_id` is no longer on items; `job_id` is the last job that saw the item.
 
@@ -152,7 +151,7 @@ GET    /v1/admin/usage?days=30            → {"data": {"total_usd", "by_tenant"
 
 ```
 POST /internal/jobs/{id}/run      runs a queued job to completion inside this request (Cloud Run keeps CPU allocated)
-POST /internal/tick               enqueues due sources; marks jobs whose heartbeat is > 10 min old as failed
+POST /internal/tick               refreshes due schedules (sources); marks jobs whose heartbeat is > 10 min old as failed
 ```
 
 ## Legacy (unchanged contract, used by hashtaglocal-backend)

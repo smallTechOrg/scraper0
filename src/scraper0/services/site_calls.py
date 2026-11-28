@@ -134,7 +134,8 @@ def _parse_iso(v) -> datetime | None:
         return None
 
 
-def ensure_refresh(site_id: str, name: str, tenant_id: str, version: int, freshness_h: float) -> str | None:
+def ensure_refresh(site_id: str, name: str, tenant_id: str, version: int, freshness_h: float,
+                   force: bool = False) -> str | None:
     """→ id of the refresh job to wait for (started now or already running), or None when the data is fresh.
     Fresh means scraped within freshness_h *and* no stored image link about to expire."""
     cutoff = now() - timedelta(hours=freshness_h)
@@ -154,7 +155,8 @@ def ensure_refresh(site_id: str, name: str, tenant_id: str, version: int, freshn
                 return j.id                                     # join the running refresh
             s.execute(update(SiteAction).where(SiteAction.id == a.id, SiteAction.refresh_job_id == a.refresh_job_id)
                       .values(refresh_job_id=None))             # left over by a crashed worker
-        if a.status == "broken" and a.last_failure_at and _aware(a.last_failure_at) > now() - BROKEN_RETRY:
+        if (not force and a.status == "broken" and a.last_failure_at
+                and _aware(a.last_failure_at) > now() - BROKEN_RETRY):
             return None
         jid = new_id()
         claimed = s.execute(update(SiteAction).where(SiteAction.id == a.id, SiteAction.refresh_job_id.is_(None))
@@ -178,6 +180,18 @@ def ensure_refresh(site_id: str, name: str, tenant_id: str, version: int, freshn
                                                SiteAction.refresh_job_id == start).values(refresh_job_id=None))
         return None
     return start
+
+
+def refresh_now(tenant_id: str, site_id: str, name: str, force: bool = True) -> str | None:
+    """Refresh a locked list action now, ignoring freshness (dashboard "Refresh now", scheduled sources).
+    Joins a refresh that is already running. `force=False` (schedules) keeps a broken action's hourly retry
+    limit. → the job id, or None when nothing was started."""
+    with session_scope() as s:
+        a, v = sites_svc.get_locked(s, site_id, name)
+        if a.mode != "list":
+            raise SiteError(422, "invalid_input", f"{name} is a {a.mode} action; only list actions refresh")
+        version = v.version
+    return ensure_refresh(site_id, name, tenant_id, version, 0, force=force)
 
 
 def wait_job(job_id: str, timeout_s: float) -> str | None:

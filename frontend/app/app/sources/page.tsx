@@ -4,24 +4,10 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { useConfirm } from "@/components/confirm";
-import {
-  ConnectorForm,
-  connectorInputFromState,
-  connectorStateFromInput,
-  CrawlForm,
-  crawlInputFromState,
-  crawlStateFromInput,
-  defaultConnectorState,
-  defaultCrawlState,
-  type ConnectorState,
-  type CrawlState,
-} from "@/components/job-forms";
-import { describeJob } from "@/components/jobs";
 import { Modal } from "@/components/modal";
 import { AdminOnly, useSession } from "@/components/session";
 import {
   Alert,
-  Badge,
   Button,
   Card,
   Checkbox,
@@ -31,17 +17,25 @@ import {
   Field,
   Input,
   PageHeader,
+  Select,
   StatusBadge,
   Switch,
   Table,
   Td,
   Th,
 } from "@/components/ui";
-import { api, errorMessage, type ConnectorInput, type CrawlInput, type Source } from "@/lib/api";
+import { api, errorMessage, sitesApi, type SiteSummary, type Source } from "@/lib/api";
 import { timeAgo } from "@/lib/format";
 import { useAsync } from "@/lib/hooks";
 
 const MIN_INTERVAL = 15;
+
+/** Locked (or broken, which keeps serving its locked version) list actions: what a schedule can refresh. */
+function readActions(site: SiteSummary): string[] {
+  return site.actions
+    .filter((a) => a.kind === "read" && (a.mode ?? "list") === "list" && (a.status === "locked" || a.status === "broken"))
+    .map((a) => a.name);
+}
 
 function intervalLabel(m: number): string {
   if (m % 1440 === 0) return m === 1440 ? "daily" : `every ${m / 1440} days`;
@@ -67,29 +61,35 @@ function SourceEditor({
   onSaved: (s: Source) => void;
 }) {
   const [name, setName] = useState(source?.name ?? "");
-  const [kind, setKind] = useState<"crawl" | "connector">(source?.kind ?? "crawl");
-  const [crawl, setCrawl] = useState<CrawlState>(
-    source?.kind === "crawl" ? crawlStateFromInput(source.config as CrawlInput) : defaultCrawlState,
-  );
-  const [conn, setConn] = useState<ConnectorState>(
-    source?.kind === "connector" ? connectorStateFromInput(source.config as ConnectorInput) : defaultConnectorState,
-  );
+  const [siteId, setSiteId] = useState(source?.site_id ?? "");
+  const [action, setAction] = useState(source?.action ?? "fetch_events");
   const [interval, setIntervalMin] = useState(String(source?.interval_minutes ?? 1440));
   const [enabled, setEnabled] = useState(source?.enabled ?? true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const formId = "source-form";
+  const sites = useAsync(() => sitesApi.list(), "sites-for-sources");
+  const usable: SiteSummary[] = (sites.data ?? []).filter((x) => readActions(x).length > 0);
+  const chosen = usable.find((x) => x.site_id === siteId);
+  const actions = chosen ? readActions(chosen) : [];
+
+  function pickSite(id: string) {
+    setSiteId(id);
+    const site = usable.find((x) => x.site_id === id);
+    const names = site ? readActions(site) : [];
+    if (names.length && !names.includes(action)) setAction(names[0]);
+    if (!name.trim() && site) setName(site.name);
+  }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError(null);
     if (!name.trim()) return setError("Give the source a name.");
+    if (!siteId) return setError("Choose an onboarded site.");
     const minutes = Number(interval);
     if (!Number.isInteger(minutes) || minutes < MIN_INTERVAL)
       return setError(`Interval must be a whole number of at least ${MIN_INTERVAL} minutes.`);
-    const r = kind === "crawl" ? crawlInputFromState(crawl) : connectorInputFromState(conn);
-    if ("error" in r) return setError(r.error);
-    const body = { name: name.trim(), kind, config: r.input, interval_minutes: minutes, enabled };
+    const body = { name: name.trim(), site_id: siteId, action, interval_minutes: minutes, enabled };
     setBusy(true);
     try {
       const saved = source ? await api.updateSource(source.id, body) : await api.createSource(body);
@@ -105,57 +105,57 @@ function SourceEditor({
       open
       onClose={onClose}
       size="lg"
-      title={source ? `Edit ${source.name}` : "New source"}
-      description="A source runs a crawl or connector job on a schedule."
+      title={source ? `Edit ${source.name}` : "New schedule"}
+      description="Refreshes a locked site action on a schedule. Only onboarded sites with a locked read action can be scheduled."
       footer={
         <>
           <Button onClick={onClose} disabled={busy}>
             Cancel
           </Button>
           <Button type="submit" form={formId} variant="primary" loading={busy}>
-            {source ? "Save changes" : "Create source"}
+            {source ? "Save changes" : "Create schedule"}
           </Button>
         </>
       }
     >
       <form id={formId} onSubmit={submit} className="space-y-5">
-        <Field label="Name">
-          {(id) => (
-            <Input id={id} data-autofocus value={name} onChange={(e) => setName(e.target.value)} placeholder="City venues — weekly" />
+        <Field label="Site" hint={chosen ? chosen.base_url : "Sites with a locked read action."}>
+          {(id, hint) => (
+            <Select id={id} aria-describedby={hint} value={siteId} onChange={(e) => pickSite(e.target.value)} disabled={busy}>
+              <option value="">{sites.loading ? "Loading sites…" : "Choose a site"}</option>
+              {usable.map((x) => (
+                <option key={x.site_id} value={x.site_id}>
+                  {x.name} ({x.site_id})
+                </option>
+              ))}
+            </Select>
           )}
         </Field>
-        <fieldset>
-          <legend className="mb-1.5 text-sm font-medium">Kind</legend>
-          <div className="grid grid-cols-2 gap-2 sm:max-w-xs">
-            {(["crawl", "connector"] as const).map((k) => (
-              <label
-                key={k}
-                className={cx(
-                  "flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm",
-                  kind === k ? "border-accent bg-accent-soft text-accent-soft-fg" : "border-border hover:bg-surface-2",
-                )}
-              >
-                <input
-                  type="radio"
-                  name="kind"
-                  value={k}
-                  checked={kind === k}
-                  onChange={() => setKind(k)}
-                  className="accent-[var(--accent)]"
-                />
-                {k}
-              </label>
-            ))}
-          </div>
-        </fieldset>
-
-        <div className="rounded-lg border border-border p-4">
-          {kind === "crawl" ? (
-            <CrawlForm value={crawl} onChange={setCrawl} disabled={busy} />
-          ) : (
-            <ConnectorForm value={conn} onChange={setConn} disabled={busy} />
+        {sites.data && usable.length === 0 && (
+          <Alert tone="warning">
+            No site has a locked read action yet.{" "}
+            <Link href="/app/sites" className="underline">
+              Onboard a site
+            </Link>{" "}
+            and lock an action first.
+          </Alert>
+        )}
+        <Field label="Action">
+          {(id) => (
+            <Select id={id} value={action} onChange={(e) => setAction(e.target.value)} disabled={busy || !chosen}>
+              {(actions.length ? actions : [action]).map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </Select>
           )}
-        </div>
+        </Field>
+        <Field label="Name">
+          {(id) => (
+            <Input id={id} data-autofocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Karmana — every 6 h" />
+          )}
+        </Field>
 
         <Field label="Run every (minutes)" hint={`At least ${MIN_INTERVAL} minutes.`}>
           {(id, hint) => (
@@ -189,7 +189,7 @@ function SourceEditor({
             </div>
           )}
         </Field>
-        <Checkbox label="Enabled" hint="Disabled sources keep their settings but don't run on schedule." checked={enabled} onChange={setEnabled} />
+        <Checkbox label="Enabled" hint="Disabled schedules keep their settings but don't run." checked={enabled} onChange={setEnabled} />
         {error && <Alert>{error}</Alert>}
       </form>
     </Modal>
@@ -216,7 +216,12 @@ export default function SourcesPage() {
     setRowBusy(s.id);
     try {
       const job = await api.runSource(s.id);
-      router.push(`/app/jobs/${encodeURIComponent(job.id)}`);
+      if (job.id) router.push(`/app/jobs/${encodeURIComponent(job.id)}`);
+      else {
+        setActionError("Joined a refresh another workspace started; its results land in this site's items.");
+        setRowBusy(null);
+        sources.reload();
+      }
     } catch (err) {
       setActionError(errorMessage(err));
       setRowBusy(null);
@@ -239,7 +244,7 @@ export default function SourcesPage() {
     const ok = await confirm({
       title: `Delete “${s.name}”?`,
       message: "The schedule is removed. Past jobs and stored items are kept.",
-      confirmLabel: "Delete source",
+      confirmLabel: "Delete schedule",
       action: () => api.deleteSource(s.id),
     });
     if (ok) sources.setData((prev) => (prev ?? []).filter((x) => x.id !== s.id));
@@ -249,11 +254,11 @@ export default function SourcesPage() {
     <>
       <PageHeader
         title="Sources"
-        description="Crawls and connector actions that run on a schedule. Results land in Items and the change feed."
+        description="Schedules on onboarded site actions. Each run refreshes the locked version; results land in Items and the change feed."
         actions={
           <AdminOnly>
             <Button variant="primary" onClick={() => setEditing("new")}>
-              New source
+              New schedule
             </Button>
           </AdminOnly>
         }
@@ -267,13 +272,13 @@ export default function SourcesPage() {
               title="No sources yet"
               description={
                 canAdmin
-                  ? "Save a crawl or connector as a source to keep its results fresh automatically."
-                  : "An admin can set up scheduled sources for this workspace."
+                  ? "Schedule a locked site action to keep its items fresh automatically."
+                  : "An admin can schedule site actions for this workspace."
               }
               action={
                 canAdmin && (
                   <Button variant="primary" size="sm" onClick={() => setEditing("new")}>
-                    New source
+                    New schedule
                   </Button>
                 )
               }
@@ -296,9 +301,13 @@ export default function SourcesPage() {
                   <tr key={s.id} className="hover:bg-surface-2/60">
                     <Td>
                       <p className="font-medium">{s.name}</p>
-                      <p className="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
-                        <Badge>{s.kind}</Badge>
-                        <span className="truncate">{describeJob({ kind: s.kind, input: s.config })}</span>
+                      <p className="mt-0.5 text-xs text-subtle">
+                        <Link
+                          href={`/app/sites/${encodeURIComponent(s.site_id)}?action=${encodeURIComponent(s.action)}`}
+                          className="hover:text-accent hover:underline"
+                        >
+                          {s.site_id} · {s.action}
+                        </Link>
                       </p>
                     </Td>
                     <Td className="whitespace-nowrap">
@@ -308,11 +317,16 @@ export default function SourcesPage() {
                       </p>
                     </Td>
                     <Td className="whitespace-nowrap">
-                      {s.last_job ? (
+                      {s.last_job?.id ? (
                         <Link href={`/app/jobs/${encodeURIComponent(s.last_job.id)}`} className="inline-flex items-center gap-2 hover:underline">
                           <StatusBadge status={s.last_job.status} />
                           <span className="text-xs text-muted">{timeAgo(s.last_job.created_at)}</span>
                         </Link>
+                      ) : s.last_job ? (
+                        <span className="inline-flex items-center gap-2" title="Joined a refresh another workspace started">
+                          <StatusBadge status={s.last_job.status} />
+                          <span className="text-xs text-muted">shared refresh</span>
+                        </span>
                       ) : (
                         <span className="text-xs text-subtle">Never</span>
                       )}
