@@ -58,6 +58,17 @@ Full contract: [spec/api-v2.md](spec/api-v2.md) (sites and actions) and [spec/ap
 schedules, items). Plans: [spec/recipes.md](spec/recipes.md). Design: [spec/architecture.md](spec/architecture.md) and
 [spec/sites-and-actions.md](spec/sites-and-actions.md). Deploying to Cloud Run: [docs/deploy.md](docs/deploy.md).
 
+## Backing up what was learned
+
+Locked recipes live in the database. Keep a copy as files (for example in a git repository):
+
+```bash
+uv run scraper0 export-recipes ./recipes            # <site_id>/<action>.json per locked action + index.json
+uv run scraper0 import-recipes ./recipes --lock     # after losing the database: recreate sites, actions, versions
+```
+
+Set `SCRAPER0_RECIPE_EXPORT_DIR` to have every lock write its file there. Details: [spec/recipes.md](spec/recipes.md).
+
 ## Layout
 
 ```

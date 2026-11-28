@@ -1,4 +1,4 @@
-"""scraper0 command line: serve | migrate | tick | create-admin | create-tenant | create-api-key | gen-secret-key."""
+"""scraper0 command line: serve | migrate | tick | export-recipes | import-recipes | create-admin | create-tenant | create-api-key | gen-secret-key."""
 from __future__ import annotations
 
 import argparse
@@ -27,6 +27,12 @@ def main(argv: list[str] | None = None) -> None:
     k = sub.add_parser("create-api-key")
     k.add_argument("tenant_slug")
     k.add_argument("name")
+    e = sub.add_parser("export-recipes", help="write every locked action version as a JSON file under DIR")
+    e.add_argument("dir")
+    e.add_argument("--prune", action="store_true", help="delete recipe files of actions that are no longer locked")
+    i = sub.add_parser("import-recipes", help="load recipe files (a directory or a bundle file) as new versions")
+    i.add_argument("path")
+    i.add_argument("--lock", action="store_true", help="lock the imported versions (default: add them as drafts)")
     sub.add_parser("gen-secret-key", help="print a new Fernet key for SCRAPER0_SECRET_KEY")
     args = ap.parse_args(argv)
 
@@ -55,6 +61,21 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "tick":
         from scraper0.jobs.scheduler import tick
         print(tick())
+    elif args.cmd == "export-recipes":
+        from scraper0.services import recipe_export
+        r = recipe_export.export_dir(args.dir, prune=args.prune)
+        print(f"{r['written']} written, {r['unchanged']} unchanged, {r['removed']} removed → {args.dir}")
+    elif args.cmd == "import-recipes":
+        from scraper0.services import recipe_export
+        try:
+            r = recipe_export.import_path(args.path, lock=args.lock)
+        except recipe_export.RecipeError as err:
+            sys.exit(str(err))
+        print(f"{r['created']} created, {r['updated']} updated, {r['unchanged']} unchanged, {len(r['errors'])} failed")
+        for bad in r["errors"]:
+            print(f"  {bad['file']}: {bad['error']}", file=sys.stderr)
+        if r["errors"]:
+            sys.exit(1)
     elif args.cmd == "create-admin":
         from scraper0.services.auth import create_user
         pw = os.getenv("SCRAPER0_NEW_ADMIN_PASSWORD") or getpass.getpass("password (min 10 chars): ")

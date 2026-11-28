@@ -118,3 +118,44 @@ Learning runs once per seed URL, with AI allowed.
    page.
 4. **Verify before keep.** Every plan runs cold, with no browser and no AI. The version's preview is that run's
    output, so a draft shows exactly what a locked refresh will produce.
+
+## Recipes as files (backup and restore)
+
+Everything a locked version needs to run can be written to files and read back, so what scraper0 has learned
+survives losing the database. Code: `src/scraper0/services/recipe_export.py`.
+
+```
+scraper0 export-recipes <dir> [--prune]     # one file per locked action: <dir>/<site_id>/<action>.json + index.json
+scraper0 import-recipes <dir|bundle.json> [--lock]
+GET /v2/sites/{site_id}/actions/{name}/export     (tenant admin)     → {"data": Recipe}
+GET /v2/export                                    (platform admin)   → {"data": {"format": "scraper0.recipes/1", "recipes": [Recipe]}}
+```
+
+```json
+{
+  "format": "scraper0.recipe/1",
+  "site": {"site_id": "karmana-in", "base_url": "https://karmana.in", "name": "karmana.in"},
+  "action": {"name": "fetch_events", "kind": "read", "mode": "list", "entity": "event",
+             "seed_urls": ["https://karmana.in"], "input_schema": {}, "output_schema": {}},
+  "version": 3, "locked_at": "2026-11-28T06:05:42Z", "locked_by": "admin@example.com",
+  "implementation": {"implementation": "learned", "entity": "event", "seed_urls": ["https://karmana.in"],
+                     "plans": [{"seed": "https://karmana.in", "plan": {"plan_version": 1, "…": "…"}}]}
+}
+```
+
+A code action's `implementation` is `{"implementation": "code", "connector": "TEAMEVEREST", "action": "FETCH_EVENTS"}`.
+
+- **Diff-friendly.** Keys are sorted, the layout is fixed, and a file is rewritten only when its content changes.
+  Exporting twice with nothing changed touches no file. `index.json` lists the files on disk with a `sha256` of
+  what each recipe does (site, action, implementation), not of who locked it or when.
+- **No run state, no secrets.** Previews, learn statistics, freshness and failure counters are left out.
+  Credential headers (`Authorization`, `Cookie`, `X-Api-Key`, …) are stripped on export, and a file that carries
+  one is refused on import.
+- **Import.** Each file is validated (the plan with the plan schema, a code action against the connectors in this
+  build). The site and action are created if missing. If the action's locked version already does the same thing,
+  nothing changes. Otherwise the recipe becomes the next version: a draft, or the locked one with `--lock`.
+  A bad file is reported and the others are still imported. The command exits non-zero if any file failed.
+- **Export on lock.** With `SCRAPER0_RECIPE_EXPORT_DIR` set, locking a version writes its file (and the index)
+  there. Point it at a checkout of a git repository and commit from a cron job or CI; scraper0 does not push.
+  A failed export is logged and never fails the lock. `--prune` on the command removes files of actions that are
+  no longer locked.

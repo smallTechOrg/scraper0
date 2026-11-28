@@ -4,10 +4,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Body, Request, Response
 from sqlalchemy import func, or_, select
 
-from scraper0.api.deps import APIError, Principal, require_admin, resolve
+from scraper0.api.deps import APIError, Principal, require_admin, require_platform_admin, resolve
 from scraper0.db.models import Site
 from scraper0.db.session import session_scope
-from scraper0.services import site_calls
+from scraper0.services import recipe_export, site_calls
 from scraper0.services import sites as sites_svc
 from scraper0.services.sites import SiteError
 
@@ -46,6 +46,14 @@ def _base(request: Request) -> str:
     proto = (request.headers.get("x-forwarded-proto") or request.url.scheme).split(",")[0].strip()
     host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc).split(",")[0]
     return f"{proto}://{host.strip()}"
+
+
+# ------------------------------------------------------------------ export (all locked recipes)
+
+@router.get("/export")
+def export_all(request: Request):
+    require_platform_admin(request)
+    return {"data": recipe_export.bundle()}
 
 
 # ------------------------------------------------------------------ sites
@@ -156,7 +164,15 @@ def versions(site_id: str, name: str, request: Request):
 def lock(site_id: str, name: str, n: int, request: Request):
     p = _admin(request)
     _call(sites_svc.lock_version, site_id, name, n, _who(p))
+    recipe_export.export_on_lock(site_id, name)
     return {"data": _call(sites_svc.contract, site_id, name, _base(request))}
+
+
+@router.get("/sites/{site_id}/actions/{name}/export")
+def export_action(site_id: str, name: str, request: Request):
+    """The locked version as a recipe document (the same JSON `scraper0 export-recipes` writes)."""
+    _admin(request)
+    return {"data": _call(recipe_export.export_action, site_id, name)}
 
 
 @router.get("/sites/{site_id}/actions/{name}/contract")
