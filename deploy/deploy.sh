@@ -18,8 +18,6 @@ set -euo pipefail
 : "${VPC_NETWORK:=default}"
 : "${VPC_SUBNET:=default}"
 : "${ADMIN_EMAIL:?set ADMIN_EMAIL (first platform admin login)}"
-: "${ALLOWED_BACKEND_URLS:=}"           # hashtaglocal backends allowed in X-Backend-Url
-: "${LEGACY_KEYLESS:=true}"             # true until hashtaglocal-backend sends X-API-Key
 
 NAME="scraper0-${STAGE}"
 DB_NAME="scraper0_${STAGE//-/_}"
@@ -109,7 +107,7 @@ gc run deploy "$API_SERVICE" --image "$REPO/api:$TAG" --region "$REGION" --servi
   --allow-unauthenticated --port 8080 --timeout 3600 --cpu 1 --memory 2Gi --concurrency 20 \
   --min-instances 0 --max-instances 1 --cpu-boost \
   --network "$VPC_NETWORK" --subnet "$VPC_SUBNET" --vpc-egress private-ranges-only \
-  --set-env-vars "^|^SCRAPER0_ENV=${STAGE}|SCRAPER0_JOB_MODE=cloud_tasks|SCRAPER0_DB_POOL_SIZE=2|SCRAPER0_DB_MAX_OVERFLOW=1|SCRAPER0_COOKIE_SECURE=true|SCRAPER0_LEGACY_KEYLESS=${LEGACY_KEYLESS}|SCRAPER0_BOOTSTRAP_ADMIN_EMAIL=${ADMIN_EMAIL}|SCRAPER0_BOOTSTRAP_LEGACY_TENANT=hashtaglocal|SCRAPER0_CLOUD_TASKS_QUEUE=projects/${PROJECT}/locations/${REGION}/queues/${QUEUE}|SCRAPER0_ALLOWED_BACKEND_URLS=${ALLOWED_BACKEND_URLS}" \
+  --set-env-vars "^|^SCRAPER0_ENV=${STAGE}|SCRAPER0_JOB_MODE=cloud_tasks|SCRAPER0_DB_POOL_SIZE=2|SCRAPER0_DB_MAX_OVERFLOW=1|SCRAPER0_COOKIE_SECURE=true|SCRAPER0_BOOTSTRAP_ADMIN_EMAIL=${ADMIN_EMAIL}|SCRAPER0_CLOUD_TASKS_QUEUE=projects/${PROJECT}/locations/${REGION}/queues/${QUEUE}" \
   --set-secrets "SCRAPER0_DATABASE_URL=$(secret_name db-url):latest,SCRAPER0_SECRET_KEY=$(secret_name secret-key):latest,SCRAPER0_INTERNAL_TOKEN=$(secret_name internal-token):latest,SCRAPER0_BOOTSTRAP_ADMIN_PASSWORD=$(secret_name admin-password):latest"
 API_URL="$(gc run services describe "$API_SERVICE" --region "$REGION" --format 'value(status.url)')"
 
@@ -140,4 +138,3 @@ echo
 echo "API:       $API_URL   (health: $API_URL/api/health, docs: $API_URL/api/docs)"
 echo "Dashboard: $WEB_URL"
 echo "Login:     $ADMIN_EMAIL — password: gcloud --project $PROJECT secrets versions access latest --secret $(secret_name admin-password)"
-echo "Legacy endpoint for hashtaglocal-backend: ${API_URL}/api/v1/scrape"

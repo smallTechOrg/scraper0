@@ -1,4 +1,4 @@
-"""Tenant-scoped management: tenant info, members, API keys, AI providers/usage, entities, recipes, connectors."""
+"""Tenant-scoped management: tenant info, members, API keys, AI providers/usage, entities."""
 from __future__ import annotations
 
 from datetime import timedelta
@@ -8,8 +8,6 @@ from sqlalchemy import func, select
 
 from scraper0.api.deps import APIError, require_admin, resolve
 from scraper0.config import get_settings
-from scraper0.core.entities import BUILTIN_SPECS
-from scraper0.core.store import default_store
 from scraper0.db.models import AIProvider, AIUsage, ApiKey, Membership, Tenant, User, now
 from scraper0.db.session import session_scope
 from scraper0.services import ai as ai_svc
@@ -202,7 +200,7 @@ def usage(request: Request, days: int = 30):
         return {"data": out}
 
 
-# ------------------------------------------------------------------ entities / recipes / connectors
+# ------------------------------------------------------------------ entities
 
 @router.get("/entities")
 def entities(request: Request):
@@ -227,43 +225,3 @@ def delete_entity(name: str, request: Request):
     if not entity_svc.delete_spec(p.tenant_id, name):
         raise APIError(404, "not_found", "entity not found")
     return Response(status_code=204)
-
-
-def _visible_keys(tenant_id: str) -> list[str]:
-    keys = list(BUILTIN_SPECS)
-    keys += [f"{tenant_id}:{s['name']}" for s in entity_svc.list_specs(tenant_id) if not s.get("builtin")]
-    return keys
-
-
-def _recipe_public(r: dict) -> dict:
-    return {**r, "entity": r["entity"].split(":", 1)[-1]}
-
-
-@router.get("/recipes")
-def recipes(request: Request, domain: str | None = None, entity: str | None = None):
-    p = resolve(request)
-    keys = _visible_keys(p.tenant_id)
-    if entity:
-        keys = [k for k in keys if k.split(":", 1)[-1] == entity]
-    return {"data": [_recipe_public(r) for r in default_store().list_recipes(domain, keys)]}
-
-
-@router.delete("/recipes/{rid}", status_code=204)
-def delete_recipe(rid: int, request: Request):
-    p = resolve(request)
-    require_admin(p, allow_service=True)
-    r = default_store().get_recipe(rid)
-    if r is None or r["entity"] not in _visible_keys(p.tenant_id):
-        raise APIError(404, "not_found", "recipe not found")
-    if ":" not in r["entity"] and not p.is_platform_admin:
-        raise APIError(403, "forbidden", "recipes for built-in entities are shared; only the platform admin can delete them")
-    default_store().delete_recipe(rid)
-    return Response(status_code=204)
-
-
-@router.get("/connectors")
-def connectors(request: Request):
-    resolve(request)
-    from scraper0.connectors.base import all_connectors
-    return {"data": [{"name": c.name, "source": c.source, "description": c.description, "actions": sorted(c.actions),
-                      "needs_browser": c.needs_browser} for c in all_connectors()]}

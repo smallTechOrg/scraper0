@@ -25,6 +25,13 @@ IDLE_SHUTDOWN_S = 90          # close the browser after this long without work
 NAV_TIMEOUT_MS = 30_000
 MAX_JSON_BYTES = 5_000_000
 MAX_JSON_RESPONSES = 40
+MAX_CAPTURED = 60             # requests recorded per render (any method), for learning plans
+MAX_CAPTURE_BYTES = 2_000_000
+# Headers never recorded: the browser's own, and anything that can carry a credential. A learned plan that
+# needs one of these gets it from a `capture` step at run time instead (core/plans.py).
+_DROP_HEADERS = {"cookie", "authorization", "proxy-authorization", "user-agent", "accept-encoding", "connection",
+                 "content-length", "host", "priority"}
+_SECRET_HINT = ("token", "auth", "session", "csrf", "xsrf", "secret", "signature", "api-key", "apikey")
 _BLOCK_TYPES = {"image", "media", "font"}      # not needed to read the page; saves time and bandwidth
 _LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
 
@@ -34,6 +41,39 @@ class RenderResult:
     html: str
     final_url: str
     json_responses: list[tuple[str, str]] = field(default_factory=list)   # (url, body) for GET xhr/fetch JSON
+    requests: list[CapturedRequest] = field(default_factory=list)         # every xhr/fetch, any method/host
+
+
+@dataclass
+class CapturedRequest:
+    """One xhr/fetch call the page made. `headers` is filtered (no cookies or credentials); `secret_headers`
+    lists the names that were dropped, so a learner knows what a replay is missing."""
+    method: str
+    url: str
+    headers: dict
+    body: str | None
+    status: int
+    content_type: str
+    response: str | None
+    secret_headers: list[str] = field(default_factory=list)
+    response_headers: dict = field(default_factory=dict)
+    # Values of the dropped credential headers, kept in memory only while learning (to find where a token comes
+    # from, e.g. an earlier response); a plan never contains them — it captures them at run time instead.
+    raw_secret_values: dict = field(default_factory=dict, repr=False)
+
+
+def clean_headers(headers: dict) -> tuple[dict, list[str]]:
+    keep, dropped = {}, []
+    for k, v in (headers or {}).items():
+        lk = k.lower()
+        if lk.startswith(":") or lk.startswith("sec-"):
+            continue
+        if lk in _DROP_HEADERS or any(h in lk for h in _SECRET_HINT):
+            if lk not in ("user-agent", "accept-encoding", "connection", "content-length", "host", "priority"):
+                dropped.append(lk)
+            continue
+        keep[lk] = v
+    return keep, dropped
 
 
 def is_js_shell(html: str, visible_text: str) -> bool:
@@ -127,6 +167,7 @@ class Renderer:
         t0 = time.monotonic()
         ctx = browser.new_context(viewport={"width": 1280, "height": 2000}, locale="en-IN", timezone_id="Asia/Kolkata")
         captured: list[tuple[str, str]] = []
+        calls: list[CapturedRequest] = []
         site = _site(urlsplit(url).hostname or "")
         try:
             page = ctx.new_page()
@@ -151,6 +192,22 @@ class Renderer:
                             captured.append((resp.url, body))
                 except Exception:  # noqa: BLE001 — a body can be unavailable after navigation
                     pass
+                try:
+                    req = resp.request
+                    if req.resource_type not in ("xhr", "fetch") or len(calls) >= MAX_CAPTURED:
+                        return
+                    ctype = (resp.headers.get("content-type") or "").lower()
+                    text = None
+                    if any(t in ctype for t in ("json", "text", "html", "xml", "javascript")):
+                        text = resp.text()
+                        if len(text) > MAX_CAPTURE_BYTES:
+                            text = None
+                    headers, dropped = clean_headers(req.headers)
+                    raw = {k.lower(): v for k, v in req.headers.items() if k.lower() in dropped and k.lower() != "cookie"}
+                    calls.append(CapturedRequest(req.method, req.url, headers, req.post_data, resp.status, ctype,
+                                                 text, dropped, {k.lower(): v for k, v in resp.headers.items()}, raw))
+                except Exception:  # noqa: BLE001
+                    pass
             page.on("response", on_response)
 
             try:
@@ -166,8 +223,9 @@ class Renderer:
             final = page.url
         finally:
             ctx.close()
-        log.info("rendered", url=url, ms=int((time.monotonic() - t0) * 1000), html_chars=len(html), json=len(captured))
-        return RenderResult(html=html, final_url=final, json_responses=captured)
+        log.info("rendered", url=url, ms=int((time.monotonic() - t0) * 1000), html_chars=len(html), json=len(captured),
+                 calls=len(calls))
+        return RenderResult(html=html, final_url=final, json_responses=captured, requests=calls)
 
 
 _shared: Renderer | None = None

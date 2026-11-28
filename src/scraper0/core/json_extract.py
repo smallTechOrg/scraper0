@@ -1,13 +1,10 @@
-"""Entities from JSON APIs.
+"""Mapping JSON items to entity fields (used by the plan learner and runner).
 
-Single-page apps load their data from JSON endpoints. Given the JSON responses a page fetched, find
-the array that holds the entity, map its keys to the entity's fields (name heuristics first — free;
-the LLM only when those are not enough), verify the mapping on the real items, and return rules that
-are stored as an "API recipe": next time the endpoint is fetched directly — no browser, no LLM.
-
-rules = {"api_url", "items_path", "mapping": {field: path | [paths]}, "link_template"?: str}
-A path is dotted ("location.address", "media_urls.0"); a list of paths is joined with a space
-(date + time kept in separate keys); {"first_of": [paths]} takes the first one that has a value.
+Find the arrays in a JSON response that could hold the entity, map their keys to the entity's fields (name
+heuristics first — free; the AI only when those aren't enough), measure how well a mapping works, infer link
+templates and lookups. A mapping value is a dotted path ("location.address", "media_urls.0"), a list of paths
+joined with a space (date + time in separate keys), {"first_of": [paths]} (first with a value), or
+{"template": "https://cdn/{image_path}"}.
 """
 from __future__ import annotations
 
@@ -30,12 +27,15 @@ SAMPLE = 40
 SYNONYMS: dict[str, list[str]] = {
     "name": ["name", "title", "heading", "event_name", "label"],
     "title": ["title", "name", "heading", "job_title", "position"],
-    "start_time": ["start_time", "start", "start_date", "starts_at", "start_datetime", "date", "datetime", "event_date", "begin"],
-    "end_time": ["end_time", "end", "end_date", "ends_at", "end_datetime", "date_end", "finish"],
+    "start_time": ["start_time", "start", "start_date", "starts_at", "start_datetime", "date", "datetime", "event_date",
+                   "from_date", "event_from_date", "event_start_date", "date_from", "begin"],
+    "end_time": ["end_time", "end", "end_date", "ends_at", "end_datetime", "date_end", "to_date", "event_to_date",
+                 "event_end_date", "date_to", "finish"],
     "address": ["address", "venue", "location", "place", "locality", "city"],
     "organisation": ["organisation", "organization", "organizer", "organiser", "organizer_name", "host", "company", "ngo"],
     "company": ["company", "company_name", "employer", "organisation", "organization"],
-    "image": ["image", "image_url", "poster", "banner", "cover", "cover_image", "thumbnail", "media_urls", "images", "photo"],
+    "image": ["image", "image_url", "image_path", "poster", "poster_url", "banner", "banner_image", "cover", "cover_image",
+              "cover_url", "thumbnail", "thumbnail_url", "media_urls", "images", "photo", "img"],
     "description": ["description", "summary", "details", "about", "body", "content"],
     "price": ["price", "fee", "cost", "ticket_price", "amount"],
     "link": ["link", "url", "permalink", "web_url", "href"],
@@ -147,12 +147,13 @@ def heuristic_mapping(spec: EntitySpec, items: list[dict], base: str = "") -> di
     mapping: dict = {}
     for f in spec.all_fields:
         aliases = list(dict.fromkeys([f.name] + SYNONYMS.get(f.name, [])))
+        compact = [a.replace("_", "") for a in aliases]          # StartDate / startDate → startdate
         best: tuple | None = None
         ranked: list[tuple] = []
         for path, vals in samples.items():
             seg = _seg(path)
-            if seg in aliases:
-                rank = aliases.index(seg)
+            if seg in aliases or seg.replace("_", "") in compact:
+                rank = aliases.index(seg) if seg in aliases else compact.index(seg.replace("_", ""))
             elif f.type in ("text", "address") and "." not in path and not seg.endswith(_NOT_TEXT_SUFFIX) and \
                     any(a in seg.split("_") for a in aliases):   # whole-word match on a top-level key
                 rank = len(aliases) + 1          # "other_organizer_name" for organisation
@@ -161,7 +162,7 @@ def heuristic_mapping(spec: EntitySpec, items: list[dict], base: str = "") -> di
             fit = _fits(f, spec, vals, base)
             if fit < 0.6:
                 continue
-            key = (rank, path.count("."), -fit)
+            key = (".0." in f".{path}.", rank, path.count("."), -fit)   # a list member's field (organiser.0.name) last
             ranked.append((key, path))
             if best is None or key < best[0]:
                 best = (key, path)
@@ -175,7 +176,9 @@ def heuristic_mapping(spec: EntitySpec, items: list[dict], base: str = "") -> di
             vals = [v for v in samples[path] if isinstance(v, str)]
             if vals and all(_DATE_ONLY.match(v) for v in vals):
                 parent = path.rsplit(".", 1)[0] + "." if "." in path else ""
-                for tk in _TIME_KEYS["end" if "end" in f.name else "start"]:
+                last = path.rsplit(".", 1)[-1]
+                sibling = [last.replace("date", "time")] if "date" in last else []      # event_from_date → event_from_time
+                for tk in sibling + _TIME_KEYS["end" if "end" in f.name else "start"]:
                     tv = [v for v in samples.get(parent + tk, []) if isinstance(v, str)]
                     if tv and all(_TIME_ONLY.match(v.strip()) for v in tv):
                         mapping[f.name] = [path, parent + tk]
@@ -226,6 +229,12 @@ def llm_mapping(spec: EntitySpec, items: list[dict], llm: Callable[[str], str]) 
 def apply_mapping(spec: EntitySpec, item: dict, mapping: dict, base: str) -> dict:
     out = {}
     for fname, path in mapping.items():
+        if isinstance(path, dict) and "template" in path:     # {"template": "https://cdn/x/{image_path}"}
+            filled = _link(path["template"], item, base)
+            val = spec.coerce(fname, filled, base) if filled else None
+            if val not in (None, ""):
+                out[fname] = val
+            continue
         if isinstance(path, dict):          # {"first_of": [...]} → first path with a value
             path = next((p for p in path.get("first_of", []) if get_path(item, p) not in (None, "", [])), None)
             if path is None:
@@ -340,106 +349,3 @@ def find_lookups(spec: EntitySpec, arr: list[dict], mapping: dict, api_url: str,
                 if len(vals) >= MIN_ITEMS and sum(v in ids for v in vals) / len(vals) >= 0.6:
                     return {target: {"key": k, "api_url": other_url, "items_path": path, "id": "id", "value": name_key}}
     return {}
-
-
-def _lookup_tables(rules: dict, bodies: dict[str, str]) -> dict[str, dict]:
-    tables = {}
-    for fname, lk in (rules.get("lookups") or {}).items():
-        body = bodies.get(lk["api_url"])
-        if not body:
-            continue
-        try:
-            data = json.loads(body)
-        except ValueError:
-            continue
-        arr = get_path(data, lk["items_path"]) if lk.get("items_path") else data
-        if isinstance(arr, list):
-            tables[fname] = {str(o.get(lk["id"])): o.get(lk["value"]) for o in arr if isinstance(o, dict)}
-    return tables
-
-
-def items_from_rules(spec: EntitySpec, rules: dict, body: str, page_url: str,
-                     bodies: dict[str, str] | None = None) -> list[dict]:
-    """`bodies` = {api_url: body} for lookup endpoints (missing ones just leave that field empty)."""
-    data = json.loads(body)
-    arr = get_path(data, rules["items_path"]) if rules.get("items_path") else data
-    if not isinstance(arr, list):
-        return []
-    base = rules.get("api_url") or page_url
-    tables = _lookup_tables(rules, bodies or {})
-    out = []
-    for raw in arr:
-        if not isinstance(raw, dict):
-            continue
-        item = apply_mapping(spec, raw, rules["mapping"], base)
-        if spec.validate(item):
-            continue
-        for fname, table in tables.items():
-            if fname not in item:
-                v = spec.coerce(fname, table.get(str(raw.get(rules["lookups"][fname]["key"]))), base)
-                if v not in (None, ""):
-                    item[fname] = v
-        link = _link(rules.get("link_template"), raw, page_url)
-        if link:
-            item["link"] = link
-        out.append(item)
-    return out
-
-
-def learn_api_rules(spec: EntitySpec, json_responses: list[tuple[str, str]], page_url: str,
-                    hrefs: list[str] | None = None, llm: Callable[[str], str] | None = None) -> dict | None:
-    """Pick the JSON array that best yields this entity and return verified rules for it (or None)."""
-    best: tuple[float, dict] | None = None
-    unmapped: list[tuple[str, str, list[dict]]] = []
-    for api_url, body in json_responses:
-        try:
-            data = json.loads(body)
-        except ValueError:
-            continue
-        for path, arr in candidate_arrays(data):
-            mapping = heuristic_mapping(spec, arr, api_url)
-            cov = coverage(spec, arr, mapping, api_url)
-            if cov >= MIN_COVERAGE:
-                score = cov * min(len(arr), 200)
-                if best is None or score > best[0]:
-                    best = (score, {"api_url": api_url, "items_path": path, "mapping": mapping, "learned_by": "heuristic"})
-            else:
-                unmapped.append((api_url, path, arr))
-    if best is None and llm is not None:
-        for api_url, path, arr in sorted(unmapped, key=lambda t: -len(t[2]))[:3]:     # at most 3 LLM calls
-            mapping = llm_mapping(spec, arr, llm)
-            if mapping and coverage(spec, arr, mapping, api_url) >= MIN_COVERAGE:
-                best = (1.0, {"api_url": api_url, "items_path": path, "mapping": mapping, "learned_by": "llm"})
-                break
-    if best is None:
-        return None
-    rules = best[1]
-    body = next(b for u, b in json_responses if u == rules["api_url"])
-    data = json.loads(body)
-    arr = get_path(data, rules["items_path"]) if rules["items_path"] else data
-    dicts = [x for x in arr if isinstance(x, dict)]
-    template = infer_link_template(dicts, hrefs or [])
-    if template:
-        rules["link_template"] = template
-    lookups = find_lookups(spec, dicts, rules["mapping"], rules["api_url"], json_responses)
-    if lookups:
-        rules["lookups"] = lookups
-    return rules
-
-
-def relink(rules: dict, json_responses: list[tuple[str, str]], hrefs: list[str]) -> bool:
-    """Re-infer rules['link_template'] with more hrefs (e.g. from the list page the current template points
-    at). Keeps the new template only if it ranks better. → True when it changed."""
-    body = next((b for u, b in json_responses if u == rules["api_url"]), None)
-    if body is None:
-        return False
-    data = json.loads(body)
-    arr = get_path(data, rules["items_path"]) if rules["items_path"] else data
-    dicts = [x for x in arr if isinstance(x, dict)] if isinstance(arr, list) else []
-    template = infer_link_template(dicts, hrefs)
-    old = rules.get("link_template")
-    if template and (old is None or _template_rank(template) < _template_rank(old)):
-        rules["link_template"] = template
-        return True
-    return False
-

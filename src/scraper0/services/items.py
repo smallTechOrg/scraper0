@@ -3,8 +3,7 @@
 Every item belongs to an onboarded site + action and is shared by every tenant: whatever run scrapes a
 site — a v2 refresh or a code connector run, by any tenant — upserts the same rows, keyed
 (site_id, action, item_key), with id = itm_ + sha256(site_id|action|item_key)[:24]. Each run bumps
-`last_seen_at` on every item it saw and `updated_at` only when the content changed. (The `tenant_id` column,
-once used for uploads, is always null now.)
+`last_seen_at` on every item it saw and `updated_at` only when the content changed.
 """
 from __future__ import annotations
 
@@ -13,10 +12,8 @@ import json
 from datetime import datetime, timezone
 
 from sqlalchemy import String, cast, func, or_, select
-from sqlalchemy.exc import IntegrityError
 
-from scraper0.core.entities import EVENT_SPEC
-from scraper0.db.models import Item, ItemChange, Site, now
+from scraper0.db.models import Item, ItemChange, now
 from scraper0.db.session import session_scope
 
 # fields that change on every scrape without the item really changing
@@ -28,7 +25,7 @@ SORTS = {"last_seen": "last_seen_at", "updated": "updated_at", "first_seen": "fi
 
 def item_key(data: dict) -> str:
     link = data.get("link") or (data.get("_meta") or {}).get("url")
-    if link and not str(link).startswith("upload:"):
+    if link:
         return str(link)[:500]
     basis = json.dumps({k: data.get(k) for k in sorted(data) if not k.startswith("_")}, sort_keys=True, default=str)
     return "fp:" + hashlib.sha256(basis.encode()).hexdigest()[:40]
@@ -56,46 +53,12 @@ def site_item_id(site_id: str, action: str, key: str) -> str:
     return "itm_" + hashlib.sha256(f"{site_id}|{action}|{key}".encode()).hexdigest()[:24]
 
 
-def action_for(entity_key: str) -> str:
-    """The site action a v1 run of this entity feeds: fetch_events for events, else fetch_<entity>."""
-    return "fetch_events" if entity_key == EVENT_SPEC.key else f"fetch_{entity_key}"
-
-
-def _site_of(url: str | None) -> tuple[str, str, str] | None:
-    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
-        return None
-    from scraper0.services.sites import SiteError, parse_base_url
-    try:
-        return parse_base_url(url)
-    except SiteError:
-        return None
-
-
 # ------------------------------------------------------------------ writes
 
-def _payload_event(datas: list[dict], site_id: str, action: str) -> list[tuple]:
-    """Events take the same path as a v2 refresh (engine postprocess, EventData shape, past ones dropped), so
-    a v1 run and a v2 refresh of a site produce the same ids and data."""
-    from scraper0.services.site_runs import data_hash, event_data, normalise
-    portal = next((str(d["portal"]) for d in datas if d.get("portal")), site_id.upper())
-    norm = [event_data(d) for d in normalise(datas, portal)]
-    return _payload(norm, data_hash, lambda k: site_item_id(site_id, action, k))
-
-
-def _payload(datas: list[dict], hasher, id_of) -> list[tuple]:
-    """→ [(item_key, id, content_hash, json-safe data)], exact duplicates within one batch counted once."""
-    seen, out = set(), []
-    for k, d in zip(batch_keys(datas), datas):
-        if k not in seen:
-            seen.add(k)
-            out.append((k, id_of(k), hasher(d), json.loads(json.dumps(d, default=str))))
-    return out
-
-
-def upsert_rows(s, payload: list[tuple], *, entity_key: str, site_id: str | None, action: str | None,
-                tenant_id: str | None, job_id: str | None, seq: int | None = None) -> dict:
-    """Upsert in an open session. `seq` (v2 refreshes only) marks the rows as seen by that refresh; other runs
-    leave seen_seq alone, so a v2 read keeps returning exactly what its last refresh saw."""
+def upsert_rows(s, payload: list[tuple], *, entity_key: str, site_id: str, action: str, job_id: str | None,
+                seq: int) -> dict:
+    """Upsert [(item_key, id, content_hash, data)] in an open session; `seq` marks the rows as seen by this
+    refresh, so a read returns exactly what the last refresh saw."""
     counts = {"created": 0, "updated": 0, "unchanged": 0}
     ids = [i for _, i, _, _ in payload]
     existing: dict[str, Item] = {}
@@ -105,9 +68,8 @@ def upsert_rows(s, payload: list[tuple], *, entity_key: str, site_id: str | None
     for key, iid, h, data in payload:
         it = existing.get(iid)
         if it is None:
-            s.add(Item(id=iid, site_id=site_id, action=action, entity_key=entity_key, tenant_id=tenant_id,
-                       item_key=key, data=data, content_hash=h, first_seen_at=t, last_seen_at=t, updated_at=t,
-                       seen_seq=seq or 0, job_id=job_id))
+            s.add(Item(id=iid, site_id=site_id, action=action, entity_key=entity_key, item_key=key, data=data,
+                       content_hash=h, first_seen_at=t, last_seen_at=t, updated_at=t, seen_seq=seq, job_id=job_id))
             s.add(ItemChange(item_id=iid, change="created"))
             counts["created"] += 1
             continue
@@ -117,69 +79,10 @@ def upsert_rows(s, payload: list[tuple], *, entity_key: str, site_id: str | None
             counts["updated"] += 1
         else:
             counts["unchanged"] += 1
-        if it.data != data:                       # e.g. a new image copy: not a content change
+        if it.data != data:                       # e.g. a fresh signed image link: not a content change
             it.data = data
-        it.last_seen_at, it.job_id = t, job_id
-        if seq is not None:
-            it.seen_seq = seq
+        it.last_seen_at, it.job_id, it.seen_seq = t, job_id, seq
     return counts
-
-
-def _write(payload, **kw) -> dict:
-    try:
-        with session_scope() as s:
-            return upsert_rows(s, payload, **kw)
-    except IntegrityError:                     # a concurrent run inserted one of these first: retry as update
-        with session_scope() as s:
-            return upsert_rows(s, payload, **kw)
-
-
-def ensure_site(site_id: str, base_url: str, name: str, tenant_id: str | None) -> None:
-    """Register a site seen by a v1 run (not onboarding: it gets no actions, so callers still can't read it
-    through v2 until an admin onboards and locks an action)."""
-    with session_scope() as s:
-        if s.get(Site, site_id) is None:
-            s.add(Site(site_id=site_id, base_url=base_url, name=name, created_by_tenant=tenant_id))
-
-
-def upsert_site_items(site_id: str, action: str, entity_key: str, items: list[dict], job_id: str | None) -> dict:
-    """v1 runs (crawl / connector) of a site: same rows a v2 refresh of that site + action writes."""
-    if not items:
-        return {"created": 0, "updated": 0, "unchanged": 0}
-    if entity_key == EVENT_SPEC.key:
-        payload = _payload_event(items, site_id, action)
-    else:
-        payload = _payload(items, content_hash, lambda k: site_item_id(site_id, action, k))
-    return _write(payload, entity_key=entity_key, site_id=site_id, action=action, tenant_id=None, job_id=job_id)
-
-
-def _add(total: dict, part: dict) -> dict:
-    for k, v in part.items():
-        total[k] = total.get(k, 0) + v
-    return total
-
-
-def store_run_items(tenant_id: str, entity_key: str, items: list[dict], job_id: str | None = None,
-                    site: tuple[str, str] | None = None) -> dict:
-    """Store what a code connector returned → {created, updated, unchanged}. `site=(site_id, action)` is the
-    connector's code action; without it each item goes to the site of its own link (registered if new). Items
-    with no site at all are not stored: every item belongs to a site."""
-    total = {"created": 0, "updated": 0, "unchanged": 0}
-    if not items:
-        return total
-    groups: dict[tuple[str, str], list[dict]] = {}
-    for d in items:
-        if site is not None:
-            groups.setdefault(site, []).append(d)
-            continue
-        own = _site_of(d.get("source_url")) or _site_of(d.get("link")) or _site_of((d.get("_meta") or {}).get("url"))
-        if own is None:
-            continue
-        ensure_site(own[0], own[1], own[2], tenant_id)
-        groups.setdefault((own[0], action_for(entity_key)), []).append(d)
-    for (site_id, action), group in groups.items():
-        _add(total, upsert_site_items(site_id, action, entity_key, group, job_id))
-    return total
 
 
 # ------------------------------------------------------------------ reads
@@ -194,24 +97,16 @@ def _iso(d: datetime | None) -> str | None:
 
 def item_public(i: Item) -> dict:
     return {"id": i.id, "entity": i.entity_key.split(":", 1)[-1], "item_key": i.item_key, "data": i.data,
-            "site_id": i.site_id, "action": i.action, "private": i.tenant_id is not None, "job_id": i.job_id,
+            "site_id": i.site_id, "action": i.action, "job_id": i.job_id,
             "first_seen_at": _iso(i.first_seen_at), "last_seen_at": _iso(i.last_seen_at),
             "updated_at": _iso(i.updated_at), "changed_at": _iso(i.updated_at)}
 
 
-def visible_to(tenant_id: str | None):
-    """Shared site items, plus the tenant's own private items."""
-    if tenant_id is None:
-        return Item.tenant_id.is_(None)
-    return or_(Item.tenant_id.is_(None), Item.tenant_id == tenant_id)
-
-
-def list_items(tenant_id: str | None, entity_key: str | None, q: str | None, limit: int, offset: int,
-               site_id: str | None = None, action: str | None = None, sort: str = "last_seen",
-               shared_only: bool = False) -> tuple[list[dict], int]:
+def list_items(entity_key: str | None, q: str | None, limit: int, offset: int, site_id: str | None = None,
+               action: str | None = None, sort: str = "last_seen") -> tuple[list[dict], int]:
     col = getattr(Item, SORTS.get(sort, "last_seen_at"))
     with session_scope() as s:
-        base = select(Item).where(Item.tenant_id.is_(None) if shared_only else visible_to(tenant_id))
+        base = select(Item)
         if entity_key:
             base = base.where(Item.entity_key == entity_key)
         if site_id:
@@ -226,10 +121,9 @@ def list_items(tenant_id: str | None, entity_key: str | None, q: str | None, lim
         return [item_public(i) for i in rows], int(total or 0)
 
 
-def changes(tenant_id: str, entity_key: str | None, cursor: int, limit: int) -> tuple[list[dict], int, bool]:
+def changes(entity_key: str | None, cursor: int, limit: int) -> tuple[list[dict], int, bool]:
     with session_scope() as s:
-        q = select(ItemChange, Item).join(Item, Item.id == ItemChange.item_id).where(
-            ItemChange.id > cursor, visible_to(tenant_id))
+        q = select(ItemChange, Item).join(Item, Item.id == ItemChange.item_id).where(ItemChange.id > cursor)
         if entity_key:
             q = q.where(Item.entity_key == entity_key)
         rows = s.execute(q.order_by(ItemChange.id).limit(limit + 1)).all()
@@ -239,9 +133,8 @@ def changes(tenant_id: str, entity_key: str | None, cursor: int, limit: int) -> 
         return out, (rows[-1][0].id if rows else cursor), more
 
 
-def site_filter_options(tenant_id: str | None) -> list[dict]:
-    """Sites that hold items this tenant can see, with counts (for the Items page filter)."""
+def site_filter_options() -> list[dict]:
+    """Sites that hold items, with counts (for the Items page filter)."""
     with session_scope() as s:
-        rows = s.execute(select(Item.site_id, func.count()).where(visible_to(tenant_id), Item.site_id.is_not(None))
-                         .group_by(Item.site_id).order_by(Item.site_id)).all()
+        rows = s.execute(select(Item.site_id, func.count()).group_by(Item.site_id).order_by(Item.site_id)).all()
     return [{"site_id": sid, "items": int(n)} for sid, n in rows]

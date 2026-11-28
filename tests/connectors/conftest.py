@@ -112,10 +112,9 @@ class FakeSession:
 
 @pytest.fixture
 def make_ctx():
-    def _make(ai=None, state=None, backend_url=None, auth=None):
+    def _make(ai=None, state=None, auth=None):
         progress: list[tuple[str, dict]] = []
-        ctx = ConnectorContext(tenant_id="t1", ai=ai or FakeAI(), state=state or FakeState(),
-                               backend_url=backend_url, auth=auth,
+        ctx = ConnectorContext(tenant_id="t1", ai=ai or FakeAI(), state=state or FakeState(), auth=auth,
                                progress=lambda m, d=None: progress.append((m, d)))
         ctx.progress_log = progress  # type: ignore[attr-defined]
         return ctx
@@ -124,22 +123,12 @@ def make_ctx():
 
 @pytest.fixture
 def fake_net(monkeypatch):
-    """Install a FakeSession for the event connectors, a fixed IPv4 and a stubbed dedupe callback.
-
-    Returns a function(routes, existing=set()) -> FakeSession; existing-links lookups are recorded
-    on session.existing_calls.
-    """
+    """Install a FakeSession for the event connectors and a fixed IPv4. Returns a function(routes) -> FakeSession."""
     from scraper0.connectors import _events_common as common
 
-    def _install(routes: dict, existing: set[str] | None = None, ipv4: str = "10.0.0.5"):
+    def _install(routes: dict, ipv4: str = "10.0.0.5"):
         session = FakeSession(routes)
-        session.existing_calls = []
         monkeypatch.setattr(common, "make_session", lambda: session)
         monkeypatch.setattr(common, "local_ipv4", lambda: ipv4)
-
-        def _existing(portal, backend_url):
-            session.existing_calls.append((portal, backend_url))
-            return set(existing or ())
-        monkeypatch.setattr(common, "fetch_existing_links", _existing)
         return session
     return _install

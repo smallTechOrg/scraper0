@@ -26,9 +26,6 @@ export function describeJob(job: Pick<Job, "kind"> & { input?: unknown }): strin
   if (job.kind === "connector") {
     return `${String(input.connector ?? "connector")} · ${String(input.action ?? "")}`;
   }
-  if (job.kind === "ingest") {
-    return `${typeof input.entity === "string" ? input.entity : "event"} · upload`;
-  }
   return job.kind;
 }
 

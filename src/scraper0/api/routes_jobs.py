@@ -30,8 +30,7 @@ def _own_job(s, tenant_id: str, job_id: str) -> Job:
 
 @router.post("/jobs")
 def create_job(request: Request, body: dict | None = Body(None)):
-    """Ad-hoc jobs (crawl a URL, run a connector, upload a file) are gone: every scrape runs through an
-    onboarded site and its locked action."""
+    """Jobs aren't submitted directly: every scrape runs through an onboarded site and its locked action."""
     resolve(request)
     raise APIError(422, "invalid_input",
                    "ad-hoc jobs are not supported: onboard the site (POST /v2/sites), lock an action, then read it "
@@ -241,11 +240,11 @@ def _entity_key(tenant_id: str, entity: str | None) -> str | None:
 @router.get("/items")
 def items(request: Request, entity: str | None = None, q: str | None = None, site: str | None = None,
           action: str | None = None, sort: str = "last_seen", limit: int = 50, offset: int = 0):
-    """Shared site items (whoever scraped them) plus this tenant's private items."""
+    """Stored items (shared by every tenant), filtered by entity, site, action or text."""
     p = resolve(request)
     if sort not in item_svc.SORTS:
         raise APIError(422, "invalid_input", f"sort must be one of {', '.join(item_svc.SORTS)}")
-    rows, total = item_svc.list_items(p.tenant_id, _entity_key(p.tenant_id, entity), q,
+    rows, total = item_svc.list_items(_entity_key(p.tenant_id, entity), q,
                                       max(1, min(limit, 500)), max(0, offset), site_id=site or None,
                                       action=action or None, sort=sort)
     return {"data": rows, "total": total}
@@ -253,14 +252,14 @@ def items(request: Request, entity: str | None = None, q: str | None = None, sit
 
 @router.get("/items/sites")
 def item_sites(request: Request):
-    """Sites holding items this tenant can see, with counts (for filters)."""
-    p = resolve(request)
-    return {"data": item_svc.site_filter_options(p.tenant_id)}
+    """Sites holding items, with counts (for filters)."""
+    resolve(request)
+    return {"data": item_svc.site_filter_options()}
 
 
 @router.get("/items/changes")
 def item_changes(request: Request, entity: str | None = None, cursor: int = 0, limit: int = 500):
     p = resolve(request)
-    rows, nxt, more = item_svc.changes(p.tenant_id, _entity_key(p.tenant_id, entity), max(0, cursor),
+    rows, nxt, more = item_svc.changes(_entity_key(p.tenant_id, entity), max(0, cursor),
                                        max(1, min(limit, 2000)))
     return {"data": rows, "next_cursor": nxt, "has_more": more}

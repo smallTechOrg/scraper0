@@ -2,7 +2,7 @@ import json
 
 from scraper0.connectors import _events_common as common
 
-from .conftest import FakeAI, FakeResponse
+from .conftest import FakeAI
 
 
 def test_bind_kwargs_skips_loopback_and_none():
@@ -73,22 +73,3 @@ def test_filter_in_batches_maps_by_index_across_batches():
     assert [d["done"] for d in progress] == [8, 10]
 
 
-def test_fetch_existing_links(monkeypatch):
-    calls = []
-
-    def fake_get(url, params=None, timeout=None):
-        calls.append((url, params, timeout))
-        return FakeResponse(json_data={"data": ["https://a", "https://b"]})
-
-    monkeypatch.setattr(common.requests, "get", fake_get)
-    assert common.fetch_existing_links("MYBHARATGOVIN", "https://api.example.org") == {"https://a", "https://b"}
-    assert calls == [("https://api.example.org/api/v1/events/links", {"portal": "MYBHARATGOVIN"}, 10)]
-
-    assert common.fetch_existing_links("X", None) == set()
-    monkeypatch.setattr(common.requests, "get", lambda *a, **k: FakeResponse("err", 500))
-    assert common.fetch_existing_links("X", "https://api.example.org") == set()
-
-    def boom(*a, **k):
-        raise ConnectionError("down")
-    monkeypatch.setattr(common.requests, "get", boom)
-    assert common.fetch_existing_links("X", "https://api.example.org") == set()

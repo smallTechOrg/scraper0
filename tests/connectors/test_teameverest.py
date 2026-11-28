@@ -72,21 +72,12 @@ def test_parse_detail_fallbacks():
 
 def test_fetch_without_filter(fake_net, make_ctx):
     s = fake_net(routes())
-    ctx = make_ctx(backend_url="https://backend.example")
+    ctx = make_ctx()
     out = te.fetch_events({}, ctx)
     assert out["events"][0] == EVENT0
     assert [e["name"] for e in out["events"]] == [EVENT0["name"], EVENT1_PARTIAL["name"]]
-    assert s.existing_calls == [("TEAMEVEREST", "https://backend.example")]
     assert all(kw["interface"] == "10.0.0.5" and kw["timeout"] == 15 for _, _, kw in s.calls)
     assert ctx.progress_log[-1][0] == "2 events matched"
-
-
-def test_fetch_skips_existing_links_without_fetching(fake_net, make_ctx):
-    # the backend stores og:url (http://), the list page links https:// — both must dedupe
-    s = fake_net(routes(), existing={EVENT0["link"]})
-    out = te.fetch_events({}, make_ctx())
-    assert [e["name"] for e in out["events"]] == [EVENT1_PARTIAL["name"]]
-    assert URL0 not in s.urls()
 
 
 def test_fetch_with_llm_filter(fake_net, make_ctx):

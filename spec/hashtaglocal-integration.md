@@ -9,7 +9,7 @@ This is how hashtaglocal-backend and the hashtaglocal Ops UI (hashtaglocal-front
 | Property | Env | Default |
 |---|---|---|
 | `scraper0.base-url` | `SCRAPER0_BASE_URL` | (empty = event ingestion and portal issues disabled, with a clear log line) |
-| `scraper0.api-key` | `SCRAPER0_API_KEY` | (empty = no `X-API-Key` header; works only while scraper0 has legacy keyless on) |
+| `scraper0.api-key` | `SCRAPER0_API_KEY` | (required: scraper0 rejects calls without a key) |
 | `scraper0.read-timeout-s` | `SCRAPER0_READ_TIMEOUT_S` | `60` (sent as `timeout_s`; the HTTP read timeout is this + 30 s) |
 | `scraper0.freshness-hours` | `SCRAPER0_FRESHNESS_HOURS` | `48` (the default for new event sources) |
 | `events.scrape.cron` | `EVENTS_SCRAPE_CRON` | `0 */30 * * * *` (in-process; on Cloud Run, Cloud Scheduler calls `POST /jobs/event-ingestion`) |
@@ -72,8 +72,8 @@ For each enabled source:
 - **Track:** `POST /v2/sites/smartoneblr-com/actions/track_issue/read` with `{"input": {"tracking_id"}, "auth"}`.
 - **No change for the Ops UI:** report and track keep the same endpoints and response shapes.
 
-The legacy `/api/v1/scrape` clients (`ScrapeApiClient`, and the v1 parts of `PortalIssueScrapeClient` and
-`PortalComplaintReportingService`) are replaced.
+hashtaglocal's old web-scraper clients (`ScrapeApiClient`, and the old parts of `PortalIssueScrapeClient` and
+`PortalComplaintReportingService`) are replaced; scraper0 has no `/api/v1/scrape` endpoint.
 
 ## hashtaglocal-frontend-web: Ops → Event sources (`/ops/event-sources`)
 

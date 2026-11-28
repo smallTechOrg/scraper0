@@ -65,31 +65,6 @@ def bind_kwargs(ipv4: str | None) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Backend dedupe callback
-# ---------------------------------------------------------------------------
-
-def fetch_existing_links(portal: str, backend_url: str | None) -> set[str]:
-    """Links the caller's backend already stores for `portal` (GET {backend}/api/v1/events/links).
-
-    Returns an empty set when no backend_url was given or on any failure, so callers proceed
-    without skipping anything (legacy behaviour).
-    """
-    if not backend_url:
-        return set()
-    try:
-        resp = requests.get(f"{backend_url}/api/v1/events/links", params={"portal": portal},
-                            timeout=EXISTING_LINKS_TIMEOUT)
-        if resp.ok:
-            data = resp.json().get("data", [])
-            log.info("existing_links_loaded", portal=portal, count=len(data))
-            return set(data)
-        log.warning("existing_links_failed", portal=portal, status=resp.status_code)
-    except Exception as e:  # noqa: BLE001 — dedupe is best-effort
-        log.warning("existing_links_failed", portal=portal, error=str(e))
-    return set()
-
-
-# ---------------------------------------------------------------------------
 # LLM filter
 # ---------------------------------------------------------------------------
 

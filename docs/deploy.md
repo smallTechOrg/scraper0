@@ -53,25 +53,21 @@ re-enter the keys, and the BBMP sessions just log in again.
 ```bash
 PROJECT=ai-agent-boilerplate0 REGION=us-central1 SQL_INSTANCE=<instance-name> \
 ADMIN_EMAIL=admin@madhyamakist.com \
-ALLOWED_BACKEND_URLS=https://staging.api.smalltech.in,https://api.smalltech.in \
 ./deploy/deploy.sh
 ```
 
-On every boot the API runs migrations under a Postgres advisory lock, then seeds idempotently: the platform admin, the shared
-Groq provider and the `hashtaglocal` tenant. Check it with `curl $API_URL/api/health`, which returns `db: ok`.
+On every boot the API runs migrations under a Postgres advisory lock, then seeds idempotently: the platform admin, the
+shared Groq provider (when a key is set) and the code actions. Tenants are created by the platform admin from access
+requests. Check it with `curl $API_URL/api/health`, which returns `db: ok`.
 
-## 4. Switch hashtaglocal-backend over
+The schema has a single baseline migration. A database created by an older schema history must be reset (dropped and
+recreated empty) before deploying; there is no upgrade path from it.
 
-1. **No code change needed.** In the backend's environment, point `EVENTS_SCRAPE_URL`, `PORTALISSUE_SCRAPE_URL` and
-   `PORTALISSUE_REPORT_SCRAPE_URL` at `https://<scraper0-api>/api/v1/scrape`. With `SCRAPER0_LEGACY_KEYLESS=true`, keyless calls
-   are attributed to the `hashtaglocal` tenant. The request and response contract is unchanged.
-2. **Then lock it down:** create an API key in the dashboard (hashtaglocal tenant → API keys). Add the header
-   `X-API-Key: <key>` in `ScrapeApiClient` and `PortalIssueScrapeClient`, then redeploy scraper0 with `LEGACY_KEYLESS=false`.
-3. The backend's event ingestion cron keeps working as-is. Optionally, move it to scraper0 **Sources**, then consume
-   `GET /v1/items/changes?entity=event&cursor=…` so the backend only ever receives new or changed events.
+## 4. Connect hashtaglocal-backend
 
-Rollback: point the three backend URLs back at the old VM (`/webscraperstaging/api/v1/scrape`). The VM is untouched until you
-decommission it.
+hashtaglocal-backend calls the v2 API ([spec/hashtaglocal-integration.md](../spec/hashtaglocal-integration.md)).
+Onboard and lock its sites in the dashboard, create an API key for its tenant (dashboard → API keys), and set
+`SCRAPER0_BASE_URL` and `SCRAPER0_API_KEY` in the backend's environment.
 
 ## Local
 

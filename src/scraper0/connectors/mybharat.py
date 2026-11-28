@@ -169,14 +169,10 @@ def dedupe_by_id(records: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def select_events(records: list[dict], ctx: ConnectorContext, event_filter: str, category_filter: str) -> list[dict]:
-    """Legacy: without a filter every record is returned (no backend dedupe); with a filter, records
-    whose link the backend already has are skipped before the LLM sees them."""
+    """Without a filter every record is returned; with one, the AI filters and classifies them."""
     if not (event_filter or category_filter):
         return [parse_record(r) for r in records]
-    existing = common.fetch_existing_links(PORTAL, ctx.backend_url)
-    new = [r for r in records if record_link(r) not in existing]
-    if len(records) - len(new):
-        log.info("skip_existing", count=len(records) - len(new))
+    new = records
     events = []
     for record, typ in common.filter_in_batches(ctx.ai, new, build_event_text, event_filter, category_filter,
                                                 progress=ctx.progress):

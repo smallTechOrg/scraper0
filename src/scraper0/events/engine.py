@@ -21,7 +21,7 @@ from scraper0.core.fetch import Fetcher
 from scraper0.events.schema import EVENT_TYPES, Event, clean, score
 from scraper0.core.crawler import Cancelled, CrawlOptions, Crawler
 from scraper0.core.entities import EVENT_SPEC
-from scraper0.core.store import Store, default_store
+from scraper0.core.store import Store
 from scraper0.core.urls import strip_utm_params
 
 import structlog
@@ -46,7 +46,6 @@ class Options:
     category_filter: str = ""
     use_llm_extraction: bool = True
     learn: bool = True
-    relearn: bool = False           # ignore stored recipes and cached pages (dashboard learn / repair)
     progress: Callable[[str, dict], None] | None = None
     cancelled: Callable[[], bool] | None = None
     existing_links: set[str] = field(default_factory=set)
@@ -111,7 +110,7 @@ class Engine:
         self.fetcher = fetcher
         self.llm = llm or no_llm
         self.filter_llm = filter_llm or self.llm
-        self.store = store or default_store()
+        self.store = store or Store()          # scratch knowledge for this engine's runs only
         self.last_crawl_stats: list[dict] = []
 
     def _crawler(self, portal: str) -> Crawler:
@@ -124,13 +123,13 @@ class Engine:
     def scrape_source(self, seed: str, o: Options) -> list[Event]:
         copts = CrawlOptions(
             max_list_pages=o.max_list_pages, max_detail_pages=o.max_detail_pages, workers=o.workers,
-            allow_llm=o.use_llm_extraction, learn=o.learn, relearn=o.relearn, link_hint=EVENT_LINK_HINT,
+            allow_llm=o.use_llm_extraction, learn=o.learn, link_hint=EVENT_LINK_HINT,
             skip_links=set(o.existing_links), progress=o.progress, cancelled=o.cancelled,
         )
         items, stats = self._crawler(o.portal).crawl(seed, EVENT_SPEC, copts)
         self.last_crawl_stats.append({"source": seed, "pages": stats.pages, "by_method": stats.by_method,
                                       "llm_calls": stats.llm_calls, "recipes_learned": stats.recipes_learned,
-                                      "rendered": stats.rendered})
+                                      "rendered": stats.rendered, "plan": stats.plan, "notes": stats.notes})
         return [item_to_event(i, o.portal) for i in items]
 
     # ---------------------------------------------------------------- pipeline

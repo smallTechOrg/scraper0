@@ -349,6 +349,57 @@ function DraftReview({
 // Versions
 // ---------------------------------------------------------------------------
 
+type PlanStep = {
+  id: string;
+  type: string;
+  method?: string;
+  url?: string;
+  request?: { method?: string; url?: string };
+  paginate?: { mode: string };
+  uses_ai?: boolean;
+  fields?: string[];
+  alternatives?: PlanStep[];
+};
+
+/** The steps of every plan in a learned version's snapshot (code versions have none). */
+function planSteps(snapshot: Record<string, unknown> | null): Array<{ seed: string; steps: PlanStep[] }> {
+  const plans = (snapshot?.plans as Array<{ seed: string; plan: { steps: PlanStep[] } }> | undefined) ?? [];
+  return plans.map((p) => ({ seed: p.seed, steps: p.plan?.steps ?? [] }));
+}
+
+function stepLine(st: PlanStep): string {
+  if (st.type === "any_of") return `one of: ${(st.alternatives ?? []).map(stepLine).join(" | ")}`;
+  if (st.type === "ai" || st.type === "captcha") return `${st.type} (uses AI)${st.fields ? ` · fills ${st.fields.join(", ")}` : ""}`;
+  const req = st.type === "request" ? st : st.request ?? {};
+  const parts = [`${(req.method ?? "GET").toUpperCase()} ${req.url ?? ""}`];
+  if (st.paginate) parts.push(`pages: ${st.paginate.mode}`);
+  return `${st.type} · ${parts.join(" · ")}`;
+}
+
+function PlanView({ snapshot }: { snapshot: Record<string, unknown> | null }) {
+  const plans = planSteps(snapshot);
+  if (snapshot?.implementation === "code") {
+    return <p className="px-4 py-3 text-xs text-muted">Runs the code connector {String(snapshot.connector ?? "")}.</p>;
+  }
+  if (plans.length === 0) return null;
+  return (
+    <div className="space-y-2 px-4 py-3">
+      {plans.map((p) => (
+        <div key={p.seed}>
+          <div className="text-xs font-medium text-subtle">How it runs · {p.seed}</div>
+          <ol className="mt-1 list-decimal space-y-0.5 pl-5 font-mono text-xs text-muted">
+            {p.steps.map((st) => (
+              <li key={st.id} className="break-all">
+                <span className="text-fg">{st.id}</span> — {stepLine(st)}
+              </li>
+            ))}
+          </ol>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function VersionsCard({
   action,
   versions,
@@ -444,9 +495,9 @@ function VersionsCard({
                     <Td className="tabular-nums">{v.preview ? v.preview.count : "—"}</Td>
                     <Td>
                       <div className="flex justify-end gap-1.5">
-                        {v.preview && v.preview.items.length > 0 && (
+                        {((v.preview && v.preview.items.length > 0) || planSteps(v.implementation_snapshot).length > 0) && (
                           <Button size="sm" variant="ghost" onClick={() => setOpen(expanded ? null : v.version)} aria-expanded={expanded}>
-                            {expanded ? "Hide" : "Preview"}
+                            {expanded ? "Hide" : "Details"}
                           </Button>
                         )}
                         {canMutate && v.status === "draft" && (
@@ -457,10 +508,11 @@ function VersionsCard({
                       </div>
                     </Td>
                   </tr>
-                  {expanded && v.preview && (
+                  {expanded && (
                     <tr>
                       <td colSpan={6} className="border-b border-border bg-surface-2/50 p-0">
-                        <ItemsTable rows={toItemRows(v.preview.items)} entity={action.entity ?? undefined} />
+                        <PlanView snapshot={v.implementation_snapshot} />
+                        {v.preview && <ItemsTable rows={toItemRows(v.preview.items)} entity={action.entity ?? undefined} />}
                       </td>
                     </tr>
                   )}

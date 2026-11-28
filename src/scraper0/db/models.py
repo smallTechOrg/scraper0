@@ -160,49 +160,6 @@ class EntitySpecRow(Base):
     updated_at: Mapped[datetime] = mapped_column(TS, default=now)
 
 
-class Recipe(Base):
-    __tablename__ = "recipes"
-    __table_args__ = (UniqueConstraint("domain", "path_pattern", "entity_key", name="uq_recipe"),)
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    domain: Mapped[str] = mapped_column(String(255), index=True)
-    path_pattern: Mapped[str] = mapped_column(String(500))
-    entity_key: Mapped[str] = mapped_column(String(120))
-    strategy: Mapped[str] = mapped_column(String(32), default="selectors")
-    rules: Mapped[dict] = mapped_column(JSON)
-    sample_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    successes: Mapped[int] = mapped_column(Integer, default=0)
-    failures: Mapped[int] = mapped_column(Integer, default=0)
-    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
-    status: Mapped[str] = mapped_column(String(16), default="active")            # active | stale
-    spec_version: Mapped[int] = mapped_column(Integer, default=1)
-    created_at: Mapped[datetime] = mapped_column(TS, default=now)
-    updated_at: Mapped[datetime] = mapped_column(TS, default=now)
-
-
-class CrawlHint(Base):
-    __tablename__ = "crawl_hints"
-    __table_args__ = (UniqueConstraint("seed", "entity_key", name="uq_hint"),)
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    seed: Mapped[str] = mapped_column(String(2000))
-    entity_key: Mapped[str] = mapped_column(String(120))
-    patterns: Mapped[dict] = mapped_column(JSON)
-    updated_at: Mapped[datetime] = mapped_column(TS, default=now)
-
-
-class PageCache(Base):
-    __tablename__ = "page_cache"
-    __table_args__ = (UniqueConstraint("url", "entity_key", name="uq_page"),)
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    url: Mapped[str] = mapped_column(String(2000))
-    entity_key: Mapped[str] = mapped_column(String(120))
-    content_hash: Mapped[str] = mapped_column(String(64))
-    items: Mapped[list] = mapped_column(JSON)
-    extraction: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    fetched_at: Mapped[datetime] = mapped_column(TS, default=now)
-
-
-# ------------------------------------------------------------------ jobs, sources, results
-
 class Job(Base):
     __tablename__ = "jobs"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
@@ -247,33 +204,28 @@ class Source(Base):
 
 
 class Item(Base):
-    """Every stored item, in one table. A site item (site_id + action set) is shared by every tenant: whichever run
-    scrapes that site (a v2 refresh, a v1 crawl or connector job, any tenant) updates the same row, and its id
-    is itm_ + sha256(site_id|action|item_key)[:24]. A private item (tenant_id set, action null: uploads, and
-    tenant-defined entities) is visible to that tenant only; its id hashes "tenant:" + tenant_id instead."""
+    """Every stored item. Items belong to a site + action and are shared by every tenant: each refresh of that
+    action, whoever triggers it, updates the same rows. id = itm_ + sha256(site_id|action|item_key)[:24]."""
     __tablename__ = "items"
     __table_args__ = (UniqueConstraint("site_id", "action", "item_key", name="uq_item_site"),
-                      UniqueConstraint("tenant_id", "entity_key", "item_key", name="uq_item_tenant"),
                       Index("ix_items_action", "site_id", "action", "seen_seq"),
                       Index("ix_items_last_seen", "last_seen_at"))
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    site_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    action: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    site_id: Mapped[str] = mapped_column(String(255))
+    action: Mapped[str] = mapped_column(String(64))
     entity_key: Mapped[str] = mapped_column(String(120))
-    tenant_id: Mapped[str | None] = mapped_column(String(32), nullable=True)   # set only on private items
     item_key: Mapped[str] = mapped_column(String(500))                           # canonical link or fingerprint
     data: Mapped[dict] = mapped_column(JSON)
     content_hash: Mapped[str] = mapped_column(String(64))
     first_seen_at: Mapped[datetime] = mapped_column(TS, default=now)
     last_seen_at: Mapped[datetime] = mapped_column(TS, default=now)              # any run that saw it
     updated_at: Mapped[datetime] = mapped_column(TS, default=now)                # its content last changed
-    seen_seq: Mapped[int] = mapped_column(Integer, default=0)                    # SiteAction.scrape_seq of the last v2 refresh that saw it
+    seen_seq: Mapped[int] = mapped_column(Integer, default=0)                    # SiteAction.scrape_seq of the last refresh that saw it
     job_id: Mapped[str | None] = mapped_column(String(32), nullable=True)        # last job that saw it
 
 
 class ItemChange(Base):
-    """Append-only change log for all items; its id is the change-feed cursor. Each tenant's feed shows the
-    changes of shared site items plus its own private items."""
+    """Append-only change log for all items; its id is the change-feed cursor."""
     __tablename__ = "item_changes"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     item_id: Mapped[str] = mapped_column(String(32), index=True)

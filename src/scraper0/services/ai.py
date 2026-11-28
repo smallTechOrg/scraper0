@@ -144,6 +144,7 @@ class AIClient:
         self.calls = 0
         self.cost_usd = 0.0
         self.errors: list[str] = []     # budget / provider problems, reported in the job result
+        self.last_usage: dict = {}       # tokens of the most recent call (plans account AI per step)
 
     def _provider(self) -> llm.ProviderConfig:
         with session_scope() as s:
@@ -167,6 +168,7 @@ class AIClient:
             raise
         res = (self._complete_override or llm.complete)(cfg, prompt, image=image, mime=mime)
         cost = cfg.cost(res.input_tokens, res.output_tokens)
+        self.last_usage = {"input_tokens": res.input_tokens, "output_tokens": res.output_tokens, "cost_usd": cost}
         self.calls += 1
         self.cost_usd += cost
         with session_scope() as s:

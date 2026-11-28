@@ -1,8 +1,8 @@
-# scraper0 HTTP API (v0.1)
+# scraper0 HTTP API: tenants, jobs, schedules, items
 
 JSON everywhere, apart from SSE streams. Times are ISO-8601 UTC. Errors use the shape
 `{"error": {"code": "snake_case", "message": "human text"}}` with 400 / 401 / 403 / 404 / 409 / 413 / 422 / 429 / 502 status codes.
-The one exception is the legacy endpoint, which keeps its old error shape (see below).
+Sites, actions, reads and writes are in [api-v2.md](api-v2.md).
 
 ## Authentication
 
@@ -64,34 +64,29 @@ PUT    /v1/entities/{name} (admin)        {description, fields:[{name,type,requi
 DELETE /v1/entities/{name} (admin)        → 204
 EntitySpec = {name, description, fields, version, builtin}
 field type ∈ text | datetime | url | image | number | bool | enum | address
-
-GET    /v1/recipes?domain=&entity=        → {"data": [Recipe]}  (built-in entity recipes + this tenant's custom-entity recipes)
-DELETE /v1/recipes/{id}    (admin)        → 204   (forget a learned layout; built-in recipes: platform admin only)
-Recipe = {id, domain, path_pattern, entity, rules, sample_url, successes, failures, status, updated_at}
-
-GET    /v1/connectors                     → {"data": [{name, source, description, actions, needs_browser}]}
 ```
 
 ## Jobs (history)
 
-There are no ad-hoc jobs. Every scrape runs through an onboarded site and its locked action (v2,
-[api-v2.md](api-v2.md)): learning and repair (`site_learn`), refreshes (`site_refresh`: a read past its freshness,
-`POST …/refresh`, a schedule) and writes (`site_write`). `connector` jobs run a code connector for a v2 lookup or
-the legacy `/api/v1/scrape`. Older `crawl` / `ingest` jobs stay as read-only history.
+Every scrape runs through an onboarded site and its locked action ([api-v2.md](api-v2.md)): learning and repair
+(`site_learn`), refreshes (`site_refresh`: a read past its freshness, `POST …/refresh`, a schedule) and writes
+(`site_write`). A `connector` job runs a code connector for a v2 lookup that outlives its request.
 
 ```
-POST /v1/jobs                → 422 invalid_input (points to POST /v2/sites …). Uploads (/v1/jobs/ingest) are gone.
+POST /v1/jobs                → 422 invalid_input (jobs are started through /v2/sites …)
 GET  /v1/jobs?status=&kind=&limit=50&before=<created_at>  → {"data": [JobSummary]}
 GET  /v1/jobs/{id}           → {"data": Job}
 GET  /v1/jobs/{id}/events    → text/event-stream; events: `progress` {message, ...}, `log`, `done` {status}; resumes with Last-Event-ID
 POST /v1/jobs/{id}/cancel    → {"data": Job}   (cooperative; running jobs stop at the next page)
 Job = {id, kind, status, input, result, error, progress: {message, pages, items, llm_calls, recipes_learned}, source_id,
        site_id, action, created_at, started_at, finished_at}
-kind ∈ site_refresh | site_learn | site_write | connector   (history may also hold crawl | ingest)
+kind ∈ site_refresh | site_learn | site_write | connector
 status ∈ queued | running | succeeded | failed | cancelled
-result (site_refresh) = {site_id, action, version, count, stored: {created, updated, unchanged}, ai}
+result (site_refresh) = {site_id, action, version, count, stored: {created, updated, unchanged}, plan_runs?: [RunStats], ai}
 result (site_learn)   = {site_id, action, version, preview, implementation_snapshot, ai}
-result (connector)    = {data: <connector payload>, stored?: {...}, ai: {...}}
+result (connector)    = {data: <connector payload>, ai: {...}}
+RunStats = see recipes.md: requests, pages, items, ai_calls, ai_tokens, ai_by_step, entry, entry_changed_to,
+           alternatives, retries, expect_failures, outcomes
 ```
 
 ## Sources (schedules on site actions)
@@ -109,12 +104,11 @@ The tick refreshes due schedules (joining a running refresh; a broken action kee
 
 ## Stored results and change feed
 
-There is one item store, shared through sites (migrations `0004`, `0006`):
+There is one item store, shared through sites:
 
-- **Every item belongs to a site + action** and is shared by every tenant. Every run that scrapes the site updates
-  the same rows, whoever starts it: v2 refreshes and code connector runs (the site of the connector's code action,
-  e.g. TEAMEVEREST → `teameverest-ngo`). Item `id` = `itm_` + sha256(site_id | action | item_key)[:24], the same id
-  v2 reads return. (Private items — uploads — were removed in `0006`.)
+- **Every item belongs to a site + action** and is shared by every tenant. Every refresh of that action updates the
+  same rows, whoever triggers it. Item `id` = `itm_` + sha256(site_id | action | item_key)[:24], the same id v2 reads
+  return.
 - Each run bumps `last_seen_at` on every item it saw; `updated_at` moves only when the content changed (the image URL
   is not content). No versions are kept.
 
@@ -122,7 +116,7 @@ There is one item store, shared through sites (migrations `0004`, `0006`):
 GET /v1/items?entity=&site=&action=&q=&sort=last_seen|updated|first_seen&limit=50&offset=0  → {"data": [Item], "total"}
 GET /v1/items/sites                                       → {"data": [{site_id, items}]}   (sites holding visible items)
 GET /v1/items/changes?entity=event&cursor=0&limit=500     → {"data": [{change: created|updated, item: Item}], "next_cursor": int, "has_more": bool}
-Item = {id: "itm_…", entity, item_key, data, site_id, action, private (always false), job_id, first_seen_at, last_seen_at,
+Item = {id: "itm_…", entity, item_key, data, site_id, action, job_id, first_seen_at, last_seen_at,
         updated_at, changed_at (= updated_at)}
 ```
 Every tenant sees the same items, in both the list and the change feed. Consumers store
@@ -153,13 +147,3 @@ GET    /v1/admin/usage?days=30            → {"data": {"total_usd", "by_tenant"
 POST /internal/jobs/{id}/run      runs a queued job to completion inside this request (Cloud Run keeps CPU allocated)
 POST /internal/tick               refreshes due schedules (sources); marks jobs whose heartbeat is > 10 min old as failed
 ```
-
-## Legacy (unchanged contract, used by hashtaglocal-backend)
-
-```
-POST /api/v1/scrape    {"source", "context": {"portal", "action": {"type", "data"}, "auth"?}}
-                       headers: X-API-Key (hashtaglocal tenant) — or none when SCRAPER0_LEGACY_KEYLESS=true; X-Backend-Url for FETCH_EVENTS
-→ 200 {"data": <connector payload>}       e.g. {"data": {"events": [...]}} | {"data": {"tracking_id": 123}} | {"data": {"status", "meta_data"}}
-→ 422 {"code": 422, "status": "Unprocessable Entity", "errors": {"json": ["message"]}, "message": "..."}  (same shape as the old flask-smorest ValidationError)
-```
-This runs synchronously as a job (`wait=true`), so it also appears in the dashboard and its events land in stored results.

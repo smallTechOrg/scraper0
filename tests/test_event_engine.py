@@ -29,6 +29,7 @@ CUBBON = {"@type": "SocialEvent", "name": "Cubbon Park Cleanup", "startDate": "2
 
 
 class FakeFetcher:
+    from conftest import no_cookie as cookie, request_via_get as request  # noqa: E402
     def __init__(self, pages):
         self.pages = pages
         self.calls = []

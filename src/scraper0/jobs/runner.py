@@ -26,8 +26,7 @@ from scraper0.db.session import session_scope
 log = structlog.get_logger(__name__)
 TERMINAL = {"succeeded", "failed", "cancelled"}
 # Every scrape goes through an onboarded site + locked action (v2): site_* jobs. "connector" runs a code
-# connector internally (v2 lookups and the legacy /api/v1/scrape); nothing submits it from outside.
-# Older "crawl"/"ingest" jobs may still exist as history; they are never run again.
+# connector for a v2 lookup that outlives its request; nothing submits it from outside.
 KINDS = {"connector", "site_refresh", "site_learn", "site_write"}
 STALE_AFTER = timedelta(minutes=10)
 

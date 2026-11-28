@@ -2,75 +2,79 @@
 
 ```
                  ┌──────────────── Cloud Run: scraper0-web (Next.js) ───────────────┐
- browser ───────▶│ landing · /login · /app (tenant dashboard) · /admin (platform)     │── rewrites /v1, /api ──┐
-                 └────────────────────────────────────────────────────────────────────┘                        │
- hashtaglocal-backend ── POST /api/v1/scrape (legacy) ──┐                                                       │
- programs ───────────── X-API-Key ── /v1/* ─────────────┤                                                       ▼
- Cloud Scheduler ────── /internal/tick (1/min) ─────────┤      ┌──────── Cloud Run: scraper0-api (FastAPI) ─────────┐
- Cloud Tasks ────────── /internal/jobs/{id}/run ────────┴─────▶│ api/      routes, auth (key | session), CSRF        │
-                                                                │ jobs/     submit → dispatch → run (atomic claim)    │
-                                                                │ services/ ai (providers, budget, metering), auth,   │
-                                                                │           items (upsert + change feed), entities    │
-                                                                │ core/     crawler · recipes · llm · fetch · store   │
-                                                                │ events/   event engine, extractors, dedupe          │
-                                                                │ connectors/ TEAMEVEREST MYBHARATGOVIN IVOLUNTEERIN  │
-                                                                │            SMARTONEBLR (Playwright) WEBEVENTS       │
-                                                                └───────────────┬────────────────────────────────────┘
-                                                                                │ ≤ 3 connections
-                                                               Cloud SQL (hashtaglocal instance) · database `scraper0`
+ browser ───────▶│ landing · /login · /app (tenant dashboard) · /admin (platform)     │── rewrites /v1, /v2, /api ─┐
+                 └────────────────────────────────────────────────────────────────────┘                            │
+ programs (e.g. hashtaglocal-backend) ── X-API-Key ── /v2/sites/… ──┐                                               ▼
+ Cloud Scheduler ────── /internal/tick (1/min) ─────────────────────┤      ┌──── Cloud Run: scraper0-api (FastAPI) ────────┐
+ Cloud Tasks ────────── /internal/jobs/{id}/run ────────────────────┴─────▶│ api/      routes, auth (key | session), CSRF   │
+                                                                            │ jobs/     submit → dispatch → run (atomic claim)│
+                                                                            │ services/ sites, site_runs, site_calls, items,  │
+                                                                            │           ai (providers, budget, metering)      │
+                                                                            │ core/     plans · plan_learn · crawler · fetch ·│
+                                                                            │           render · json_extract · llm           │
+                                                                            │ events/   event engine, extractors, dedupe      │
+                                                                            │ connectors/ TEAMEVEREST MYBHARATGOVIN           │
+                                                                            │            IVOLUNTEERIN SMARTONEBLR (Playwright)│
+                                                                            └──────────────┬─────────────────────────────────┘
+                                                                                           │ ≤ 3 connections
+                                                                       Cloud SQL (shared instance) · database `scraper0_<stage>`
 ```
 
 ## Concepts
 
-- **Tenant:** an organisation using scraper0. Users join through invites, with role `admin` or `member`. Programs authenticate
-  with tenant API keys. Platform admins manage tenants, access requests and shared AI providers.
-- **Entity spec:** *what* to extract, described as data: fields with types and required flags. `event` is built in, and
-  tenants define their own (jobs, NGOs, …). Changing a spec bumps its version, which invalidates cached results.
-- **Recipe:** a learned page layout for (domain, URL path pattern, entity). It holds CSS-selector rules induced from one
-  AI reading, verified by re-extracting that same page. Later pages with the layout use selectors only, with no AI.
-  After 3 failures in a row the recipe goes stale and is relearned; old selectors are kept as fallbacks.
-  **Recipes for built-in entities are shared by all tenants**: a public page is learned once for everyone. Custom
-  entities' recipes are private to their tenant (`entity_key = "<tenant_id>:<name>"`).
-- **Connector:** hand-written integration for a site that needs it (login, forms, private API). It exposes named
-  actions and gets AI and encrypted state through its context, never directly.
-- **Job:** every scrape is a job on an onboarded site action (site_learn | site_refresh | site_write; connector internally) with persisted progress events (served as SSE), result,
-  cancellation and heartbeat. **Source:** a saved job input plus an interval, run by the scheduler tick.
-- **Item:** a stored result per (tenant, entity, item_key), with first_seen / last_seen / changed_at. Each change appends to
-  `item_changes`, and its id is the change-feed cursor.
+- **Tenant:** an organisation using scraper0. Users join through invites, with role `admin` or `member`. Programs
+  authenticate with tenant API keys. Platform admins manage tenants, access requests and the shared AI providers.
+- **Site:** a website, identified by its base URL. Sites are shared by every tenant.
+- **Action:** something scraper0 can do on a site, either a read (`fetch_events`, `track_issue`) or a write
+  (`report_issue`). Its implementation is either *learned* (plans) or *code* (a connector).
+- **Version:** each learn or repair creates a draft version. An admin locks one, and only the locked version serves
+  callers. A learned version holds its plans (`implementation_snapshot.plans`) plus the preview its cold run produced.
+- **Plan:** the recipe, held as data. See [recipes.md](recipes.md).
+- **Item:** a stored result per (site, action, item_key), shared by every tenant, with first seen, last seen and last
+  changed times. Each change appends to `item_changes`, whose id is the change-feed cursor.
+- **Job:** every learn, refresh and write is a job (`site_learn`, `site_refresh`, `site_write`; a `connector` job
+  runs a lookup that outlives its request). Jobs have persisted progress events (served as SSE), a result,
+  cancellation and a heartbeat. A **source** is a schedule that refreshes a locked list action.
+- **Entity spec:** *what* to extract, described as data (fields, types, required flags). `event` is built in, and
+  learned actions currently use it.
 
-## Per page, cheapest first
+## Learning versus running
 
-1. **page cache:** if the fingerprint (visible text + JSON-LD + meta + image URLs) is unchanged, return the previous result
-2. **structured data** (events): JSON-LD, microdata, ICS, RSS, OpenGraph
-3. **learned recipe** for this domain + path pattern
-4. **heuristic** (events): labelled text ("Date:", "Venue:")
-5. **AI:** the spec-driven prompt returns values and verbatim sources, then a recipe is learned from them
+Learning uses AI where it must. Running a locked plan doesn't; see [recipes.md](recipes.md) for the rule.
 
-**JavaScript-only pages.** When the static HTML is an empty shell (almost no visible text, but scripts), the page is
-rendered in headless Chromium (`core/render.py`: one browser on a dedicated thread; every sub-request passes the SSRF
-guard; images/fonts/media are blocked). While it renders, same-site JSON responses to GET requests are captured.
-`core/json_extract.py` then finds the array that holds the entity and maps keys to fields: name heuristics first, the
-LLM only if those fail. It verifies the mapping on the real items, works out the item link pattern from the rendered
-anchors, and resolves `*_id` references into names from other captured arrays. The result is stored as a recipe with
-strategy `json_api`, keyed `api:<start path>`. The next crawl of that start URL calls the API directly; if that stops
-working, it renders and relearns. With a stored or freshly learned API, the page's links are not walked: the API is
-the full list.
+**Learning one seed URL:**
 
-Per site, **crawl hints** remember which link patterns yielded items, rank them first, and skip patterns that never do.
+1. **Fetch the page.** If it is a JavaScript shell, render it in headless Chromium (`core/render.py`). That uses one
+   browser on a dedicated thread, every sub-request passes the SSRF guard, and images, fonts and media are blocked.
+   While the page renders, every fetch or XHR call is captured.
+2. **If a captured call returns the entity,** `core/plan_learn.py` turns it into a plan. It confirms the mapping,
+   paging, tokens and date filters by replaying the call without the browser.
+3. **Otherwise the crawler walks the site** (`core/crawler.py`). Each page goes through the cheapest route first:
+   structured data (JSON-LD, microdata, ICS, RSS) → the layout rules already learned in this run → heuristics → AI.
+   An AI answer is turned into CSS rules for that page layout (`core/recipes.py`), verified by re-extracting the same
+   page, and reused for every other page with that layout. The detail pages that produced items define the plan's
+   link patterns.
+4. **Run each plan cold,** with no browser and no AI. Its output is the version's preview.
+
+**Running:** a refresh runs the locked version's plans (`services/site_runs.py`), or its code connector. The
+results are upserted into `items`. Failures keep the stored items and count toward broken.
 
 ## AI
 
-Providers are `groq`, `anthropic` or `openai_compat`, called over plain HTTPS with retries and pacing. Resolution order: the
-tenant's own (BYO) default provider, then the platform-shared default. Each call writes an `ai_usage` row (tokens, USD,
-purpose, byo). Shared spend is capped by the tenant's `monthly_ai_budget_usd`; BYO spend is not. Keys are Fernet-encrypted
-at rest. When AI is unavailable, crawls keep their structured and recipe results and report the problem in `result.ai.errors`.
+- **Providers:** `groq`, `anthropic` or `openai_compat`, called over plain HTTPS with retries and pacing. The tenant's
+  own (BYO) default provider is used first, then the platform-shared default.
+- **Accounting:** each call writes an `ai_usage` row (tokens, USD, purpose, BYO or shared). Shared spend is capped by
+  the tenant's `monthly_ai_budget_usd`; BYO spend is not.
+- **Keys** are Fernet-encrypted at rest.
+- **AI during reads:** reads use AI only to apply a tenant's event filter and categories. Those verdicts are cached
+  per (tenant, item content, options).
 
 ## Constraints and why
 
 | Constraint | Consequence |
 |---|---|
-| Cloud Run: CPU only while a request is in flight | jobs run inside a request: `wait=true`, the legacy endpoint, or Cloud Tasks → `/internal/jobs/{id}/run` (Tasks' 30-min deadline < the 60-min request timeout; a retry finds the job already claimed) |
-| ephemeral filesystem | connector state (BBMP cookies) lives in the DB |
-| ≤ 3 DB connections on the shared instance | `max-instances=1`, pool 2+1, every DB use is a short session, never held across network I/O; Postgres `CONNECTION LIMIT 3` |
-| multi-tenant | every query is filtered by tenant; recipe sharing only for built-in entities; portal passwords encrypted in job input and shown as `***` |
-| SSRF | user URLs and every redirect hop must resolve to public IPs; `X-Backend-Url` must be on an allowlist |
+| Cloud Run: CPU only while a request is in flight | Jobs run inside a request: a read waiting up to `timeout_s`, or Cloud Tasks → `/internal/jobs/{id}/run` (Tasks' 30-min deadline < the 60-min request timeout; a retry finds the job already claimed). |
+| Ephemeral filesystem | Connector state (BBMP cookies) lives in the DB. |
+| ≤ 3 DB connections on the shared instance | `max-instances=1`, pool 2+1, every DB use is a short session, never held across network I/O; Postgres `CONNECTION LIMIT 3`. |
+| Multi-tenant | Sites, actions and items are shared. Write records, AI usage, verdicts, API keys and jobs are per tenant. Portal passwords are encrypted in job input and shown as `***`. |
+| SSRF | Every URL and every redirect hop must resolve to public IPs. Plans can only make GET or POST requests through the fetcher. |

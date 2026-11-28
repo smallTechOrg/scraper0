@@ -44,6 +44,16 @@ def upgrade() -> None:
         batch_op.create_index(batch_op.f('ix_ai_usage_created_at'), ['created_at'], unique=False)
         batch_op.create_index(batch_op.f('ix_ai_usage_tenant_id'), ['tenant_id'], unique=False)
 
+    op.create_table('ai_verdicts',
+    sa.Column('tenant_id', sa.String(length=32), nullable=False),
+    sa.Column('item_id', sa.String(length=32), nullable=False),
+    sa.Column('content_hash', sa.String(length=64), nullable=False),
+    sa.Column('options_hash', sa.String(length=64), nullable=False),
+    sa.Column('selected', sa.Boolean(), nullable=False),
+    sa.Column('category', sa.String(length=100), nullable=True),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('tenant_id', 'item_id', 'content_hash', 'options_hash')
+    )
     op.create_table('connector_state',
     sa.Column('tenant_id', sa.String(length=32), nullable=False),
     sa.Column('connector', sa.String(length=64), nullable=False),
@@ -51,15 +61,6 @@ def upgrade() -> None:
     sa.Column('value_enc', sa.Text(), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
     sa.PrimaryKeyConstraint('tenant_id', 'connector', 'key')
-    )
-    op.create_table('crawl_hints',
-    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('seed', sa.String(length=2000), nullable=False),
-    sa.Column('entity_key', sa.String(length=120), nullable=False),
-    sa.Column('patterns', sa.JSON(), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
-    sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('seed', 'entity_key', name='uq_hint')
     )
     op.create_table('entity_specs',
     sa.Column('tenant_id', sa.String(length=32), nullable=False),
@@ -71,30 +72,34 @@ def upgrade() -> None:
     )
     op.create_table('item_changes',
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('tenant_id', sa.String(length=32), nullable=False),
-    sa.Column('item_id', sa.Integer(), nullable=False),
-    sa.Column('entity_key', sa.String(length=120), nullable=False),
+    sa.Column('item_id', sa.String(length=32), nullable=False),
     sa.Column('change', sa.String(length=16), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.PrimaryKeyConstraint('id')
     )
     with op.batch_alter_table('item_changes', schema=None) as batch_op:
-        batch_op.create_index('ix_changes_tenant_id', ['tenant_id', 'id'], unique=False)
+        batch_op.create_index(batch_op.f('ix_item_changes_item_id'), ['item_id'], unique=False)
 
     op.create_table('items',
-    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('tenant_id', sa.String(length=32), nullable=False),
+    sa.Column('id', sa.String(length=32), nullable=False),
+    sa.Column('site_id', sa.String(length=255), nullable=False),
+    sa.Column('action', sa.String(length=64), nullable=False),
     sa.Column('entity_key', sa.String(length=120), nullable=False),
     sa.Column('item_key', sa.String(length=500), nullable=False),
     sa.Column('data', sa.JSON(), nullable=False),
     sa.Column('content_hash', sa.String(length=64), nullable=False),
-    sa.Column('source_id', sa.String(length=32), nullable=True),
     sa.Column('first_seen_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('last_seen_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('changed_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('seen_seq', sa.Integer(), nullable=False),
+    sa.Column('job_id', sa.String(length=32), nullable=True),
     sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('tenant_id', 'entity_key', 'item_key', name='uq_item')
+    sa.UniqueConstraint('site_id', 'action', 'item_key', name='uq_item_site')
     )
+    with op.batch_alter_table('items', schema=None) as batch_op:
+        batch_op.create_index('ix_items_action', ['site_id', 'action', 'seen_seq'], unique=False)
+        batch_op.create_index('ix_items_last_seen', ['last_seen_at'], unique=False)
+
     op.create_table('job_events',
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('job_id', sa.String(length=32), nullable=False),
@@ -105,16 +110,6 @@ def upgrade() -> None:
     )
     with op.batch_alter_table('job_events', schema=None) as batch_op:
         batch_op.create_index(batch_op.f('ix_job_events_job_id'), ['job_id'], unique=False)
-
-    op.create_table('job_files',
-    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('job_id', sa.String(length=32), nullable=False),
-    sa.Column('filename', sa.String(length=300), nullable=False),
-    sa.Column('data', sa.LargeBinary(), nullable=False),
-    sa.PrimaryKeyConstraint('id')
-    )
-    with op.batch_alter_table('job_files', schema=None) as batch_op:
-        batch_op.create_index(batch_op.f('ix_job_files_job_id'), ['job_id'], unique=False)
 
     op.create_table('jobs',
     sa.Column('id', sa.String(length=32), nullable=False),
@@ -139,44 +134,20 @@ def upgrade() -> None:
         batch_op.create_index(batch_op.f('ix_jobs_status'), ['status'], unique=False)
         batch_op.create_index(batch_op.f('ix_jobs_tenant_id'), ['tenant_id'], unique=False)
 
-    op.create_table('page_cache',
-    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('url', sa.String(length=2000), nullable=False),
-    sa.Column('entity_key', sa.String(length=120), nullable=False),
-    sa.Column('content_hash', sa.String(length=64), nullable=False),
-    sa.Column('items', sa.JSON(), nullable=False),
-    sa.Column('extraction', sa.String(length=32), nullable=True),
-    sa.Column('fetched_at', sa.DateTime(timezone=True), nullable=False),
-    sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('url', 'entity_key', name='uq_page')
-    )
-    op.create_table('recipes',
-    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('domain', sa.String(length=255), nullable=False),
-    sa.Column('path_pattern', sa.String(length=500), nullable=False),
-    sa.Column('entity_key', sa.String(length=120), nullable=False),
-    sa.Column('strategy', sa.String(length=32), nullable=False),
-    sa.Column('rules', sa.JSON(), nullable=False),
-    sa.Column('sample_url', sa.Text(), nullable=True),
-    sa.Column('successes', sa.Integer(), nullable=False),
-    sa.Column('failures', sa.Integer(), nullable=False),
-    sa.Column('consecutive_failures', sa.Integer(), nullable=False),
-    sa.Column('status', sa.String(length=16), nullable=False),
-    sa.Column('spec_version', sa.Integer(), nullable=False),
+    op.create_table('sites',
+    sa.Column('site_id', sa.String(length=255), nullable=False),
+    sa.Column('base_url', sa.String(length=500), nullable=False),
+    sa.Column('name', sa.String(length=255), nullable=False),
+    sa.Column('created_by_tenant', sa.String(length=32), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
-    sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('domain', 'path_pattern', 'entity_key', name='uq_recipe')
+    sa.PrimaryKeyConstraint('site_id')
     )
-    with op.batch_alter_table('recipes', schema=None) as batch_op:
-        batch_op.create_index(batch_op.f('ix_recipes_domain'), ['domain'], unique=False)
-
     op.create_table('sources',
     sa.Column('id', sa.String(length=32), nullable=False),
     sa.Column('tenant_id', sa.String(length=32), nullable=False),
     sa.Column('name', sa.String(length=200), nullable=False),
-    sa.Column('kind', sa.String(length=32), nullable=False),
-    sa.Column('config', sa.JSON(), nullable=False),
+    sa.Column('site_id', sa.String(length=255), nullable=False),
+    sa.Column('action', sa.String(length=64), nullable=False),
     sa.Column('interval_minutes', sa.Integer(), nullable=False),
     sa.Column('enabled', sa.Boolean(), nullable=False),
     sa.Column('next_run_at', sa.DateTime(timezone=True), nullable=True),
@@ -208,6 +179,22 @@ def upgrade() -> None:
     sa.Column('last_login_at', sa.DateTime(timezone=True), nullable=True),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('email')
+    )
+    op.create_table('write_records',
+    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('tenant_id', sa.String(length=32), nullable=False),
+    sa.Column('site_id', sa.String(length=255), nullable=False),
+    sa.Column('action', sa.String(length=64), nullable=False),
+    sa.Column('idem_key', sa.String(length=200), nullable=False),
+    sa.Column('status', sa.String(length=16), nullable=False),
+    sa.Column('job_id', sa.String(length=32), nullable=True),
+    sa.Column('submit_started', sa.Boolean(), nullable=False),
+    sa.Column('output', sa.JSON(), nullable=True),
+    sa.Column('error', sa.Text(), nullable=True),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('tenant_id', 'site_id', 'action', 'idem_key', name='uq_write_record')
     )
     op.create_table('ai_providers',
     sa.Column('id', sa.String(length=32), nullable=False),
@@ -277,11 +264,69 @@ def upgrade() -> None:
     with op.batch_alter_table('sessions', schema=None) as batch_op:
         batch_op.create_index(batch_op.f('ix_sessions_user_id'), ['user_id'], unique=False)
 
+    op.create_table('site_actions',
+    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('site_id', sa.String(length=255), nullable=False),
+    sa.Column('name', sa.String(length=64), nullable=False),
+    sa.Column('kind', sa.String(length=16), nullable=False),
+    sa.Column('mode', sa.String(length=16), nullable=False),
+    sa.Column('entity', sa.String(length=64), nullable=False),
+    sa.Column('implementation', sa.String(length=16), nullable=False),
+    sa.Column('connector', sa.String(length=64), nullable=True),
+    sa.Column('connector_action', sa.String(length=64), nullable=True),
+    sa.Column('seed_urls', sa.JSON(), nullable=False),
+    sa.Column('status', sa.String(length=16), nullable=False),
+    sa.Column('locked_version', sa.Integer(), nullable=True),
+    sa.Column('input_schema', sa.JSON(), nullable=False),
+    sa.Column('output_schema', sa.JSON(), nullable=False),
+    sa.Column('last_success_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('last_failure_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('last_error', sa.Text(), nullable=True),
+    sa.Column('consecutive_failures', sa.Integer(), nullable=False),
+    sa.Column('last_item_count', sa.Integer(), nullable=True),
+    sa.Column('last_scraped_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('scrape_seq', sa.Integer(), nullable=False),
+    sa.Column('refresh_job_id', sa.String(length=32), nullable=True),
+    sa.Column('created_by_tenant', sa.String(length=32), nullable=True),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(['site_id'], ['sites.site_id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('site_id', 'name', name='uq_site_action')
+    )
+    with op.batch_alter_table('site_actions', schema=None) as batch_op:
+        batch_op.create_index(batch_op.f('ix_site_actions_site_id'), ['site_id'], unique=False)
+
+    op.create_table('action_versions',
+    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('action_id', sa.Integer(), nullable=False),
+    sa.Column('version', sa.Integer(), nullable=False),
+    sa.Column('status', sa.String(length=16), nullable=False),
+    sa.Column('preview', sa.JSON(), nullable=True),
+    sa.Column('implementation_snapshot', sa.JSON(), nullable=False),
+    sa.Column('job_id', sa.String(length=32), nullable=True),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('locked_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('locked_by', sa.String(length=320), nullable=True),
+    sa.ForeignKeyConstraint(['action_id'], ['site_actions.id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('action_id', 'version', name='uq_action_version')
+    )
+    with op.batch_alter_table('action_versions', schema=None) as batch_op:
+        batch_op.create_index(batch_op.f('ix_action_versions_action_id'), ['action_id'], unique=False)
+
     # ### end Alembic commands ###
 
 
 def downgrade() -> None:
     # ### commands auto generated by Alembic - please adjust! ###
+    with op.batch_alter_table('action_versions', schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f('ix_action_versions_action_id'))
+
+    op.drop_table('action_versions')
+    with op.batch_alter_table('site_actions', schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f('ix_site_actions_site_id'))
+
+    op.drop_table('site_actions')
     with op.batch_alter_table('sessions', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_sessions_user_id'))
 
@@ -296,6 +341,7 @@ def downgrade() -> None:
         batch_op.drop_index(batch_op.f('ix_ai_providers_tenant_id'))
 
     op.drop_table('ai_providers')
+    op.drop_table('write_records')
     op.drop_table('users')
     op.drop_table('tenants')
     with op.batch_alter_table('sources', schema=None) as batch_op:
@@ -303,33 +349,29 @@ def downgrade() -> None:
         batch_op.drop_index(batch_op.f('ix_sources_next_run_at'))
 
     op.drop_table('sources')
-    with op.batch_alter_table('recipes', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_recipes_domain'))
-
-    op.drop_table('recipes')
-    op.drop_table('page_cache')
+    op.drop_table('sites')
     with op.batch_alter_table('jobs', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_jobs_tenant_id'))
         batch_op.drop_index(batch_op.f('ix_jobs_status'))
         batch_op.drop_index(batch_op.f('ix_jobs_created_at'))
 
     op.drop_table('jobs')
-    with op.batch_alter_table('job_files', schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f('ix_job_files_job_id'))
-
-    op.drop_table('job_files')
     with op.batch_alter_table('job_events', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_job_events_job_id'))
 
     op.drop_table('job_events')
+    with op.batch_alter_table('items', schema=None) as batch_op:
+        batch_op.drop_index('ix_items_last_seen')
+        batch_op.drop_index('ix_items_action')
+
     op.drop_table('items')
     with op.batch_alter_table('item_changes', schema=None) as batch_op:
-        batch_op.drop_index('ix_changes_tenant_id')
+        batch_op.drop_index(batch_op.f('ix_item_changes_item_id'))
 
     op.drop_table('item_changes')
     op.drop_table('entity_specs')
-    op.drop_table('crawl_hints')
     op.drop_table('connector_state')
+    op.drop_table('ai_verdicts')
     with op.batch_alter_table('ai_usage', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_ai_usage_tenant_id'))
         batch_op.drop_index(batch_op.f('ix_ai_usage_created_at'))

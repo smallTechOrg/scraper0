@@ -1,4 +1,4 @@
-"""End-to-end over HTTP (FastAPI TestClient): auth, tenancy, AI metering, jobs, sources, items, legacy."""
+"""End-to-end over HTTP (FastAPI TestClient): auth, tenancy, AI metering, jobs, sources, items."""
 import json
 import re
 
@@ -18,9 +18,6 @@ def settings(monkeypatch):
     monkeypatch.setattr(st, "bootstrap_admin_email", ADMIN[0])
     from pydantic import SecretStr
     monkeypatch.setattr(st, "bootstrap_admin_password", SecretStr(ADMIN[1]))
-    monkeypatch.setattr(st, "bootstrap_legacy_tenant", "hashtaglocal")
-    monkeypatch.setattr(st, "legacy_keyless", False)
-    monkeypatch.setattr(st, "allowed_backend_urls", "https://backend.example")
     from pydantic import SecretStr as S
     monkeypatch.setattr(st, "internal_token", S("internal-secret-token"))
     return st
@@ -66,6 +63,7 @@ def fake_llm(monkeypatch):
 
 
 class FakeFetcher:
+    from conftest import no_cookie as cookie, request_via_get as request  # noqa: E402
     def __init__(self, pages): self.pages = pages
     def get(self, url):
         p = self.pages.get(url)
@@ -284,9 +282,9 @@ def test_refresh_now_rules(app, site, fake_llm):
     assert ann.post("/v2/sites/smartoneblr-com/actions/track_issue/refresh", headers=H).status_code == 422  # lookup
 
 
-# ------------------------------------------------------------------ custom entities + recipes
+# ------------------------------------------------------------------ custom entities
 
-def test_custom_entity_versioning_and_private_recipes(app):
+def test_custom_entity_versioning(app):
     admin = login(app)
     ann, _ = onboard(app, admin, "acme")
     zed, _ = onboard(app, admin, "zed")
@@ -295,16 +293,7 @@ def test_custom_entity_versioning_and_private_recipes(app):
     assert ann.put("/v1/entities/job", json=spec, headers=H).json()["data"]["version"] == 2
     assert ann.put("/v1/entities/event", json=spec, headers=H).status_code == 422
     assert [e["name"] for e in zed.get("/v1/entities").json()["data"]] == ["event"]
-    from scraper0.core.store import default_store
-    tid = ann.get("/v1/tenant").json()["data"]["id"]
-    default_store().save_recipe("jobs.org", "/j/*", f"{tid}:job", "selectors", {"title": [{"sel": "h1"}]}, "u")
-    rid_shared = default_store().save_recipe("ex.org", "/e/*", "event", "selectors", {"name": [{"sel": "h1"}]}, "u")
-    assert {r["entity"] for r in ann.get("/v1/recipes").json()["data"]} == {"job", "event"}
-    assert {r["entity"] for r in zed.get("/v1/recipes").json()["data"]} == {"event"}
-    assert ann.delete(f"/v1/recipes/{rid_shared}", headers=H).status_code == 403   # shared: platform admin only
 
-
-# ------------------------------------------------------------------ sources + scheduler
 
 def test_sources_and_tick(app, site, fake_llm, monkeypatch):
     admin = login(app)
@@ -334,57 +323,6 @@ def test_sources_and_tick(app, site, fake_llm, monkeypatch):
     assert ann.patch(f"/v1/sources/{s['id']}", headers=H, json={"enabled": False}).json()["data"]["enabled"] is False
 
 
-# ------------------------------------------------------------------ legacy /api/v1/scrape
-
-@pytest.fixture
-def test_connector():
-    from scraper0.connectors.base import Connector, ConnectorError, register
-
-    def fetch(data, ctx):
-        if data.get("fail"):
-            raise ConnectorError("portal is down")
-        ctx.state.set("seen", "yes")
-        return {"events": [{"name": "Legacy Drive", "image": None, "portal": "TESTPORTAL",
-                            "start_time": "2026-12-01T04:30:00.000Z", "end_time": None, "address": "X",
-                            "link": "https://t.org/1", "organisation": "T", "type": "OTHER"}],
-                "backend": ctx.backend_url, "auth": ctx.auth}
-    register(Connector(name="TESTPORTAL", source="EVENT_PORTAL", description="t", actions={"FETCH_EVENTS": fetch}))
-    yield
-
-
-def test_legacy_contract(app, settings, test_connector, monkeypatch):
-    c = TestClient(app)
-    body = {"source": "EVENT_PORTAL", "context": {"portal": "TESTPORTAL", "action": {"type": "FETCH_EVENTS", "data": {}}}}
-    r = c.post("/api/v1/scrape", json=body, headers={"X-Backend-Url": "https://backend.example"})
-    assert r.status_code == 401 and r.json()["errors"]["json"]                    # keyless disabled
-    monkeypatch.setattr(settings, "legacy_keyless", True)
-    r = c.post("/api/v1/scrape", json=body, headers={"X-Backend-Url": "https://backend.example/"})
-    assert r.status_code == 200, r.text
-    d = r.json()["data"]
-    assert d["events"][0]["name"] == "Legacy Drive" and d["backend"] == "https://backend.example"
-    assert c.post("/api/v1/scrape", json=body).json()["message"] == "Missing or unrecognized X-Backend-Url header"
-    assert c.post("/api/v1/scrape", json=body, headers={"X-Backend-Url": "https://evil.example"}).status_code == 422
-    assert c.post("/api/v1/scrape", json={**body, "source": "X"}).json()["message"] == "Unsupported source"
-    nope = {"source": "EVENT_PORTAL", "context": {"portal": "NOPE", "action": {"type": "FETCH_EVENTS", "data": {}}}}
-    assert c.post("/api/v1/scrape", json=nope).json()["message"] == "Unsupported portal"
-    fail = {"source": "EVENT_PORTAL", "context": {"portal": "TESTPORTAL", "action": {"type": "FETCH_EVENTS", "data": {"fail": 1}}}}
-    r = c.post("/api/v1/scrape", json=fail, headers={"X-Backend-Url": "https://backend.example"})
-    assert r.status_code == 422 and r.json()["message"] == "portal is down"
-    # auth travels encrypted, never stored in clear; job visible in dashboard; events stored
-    body_auth = {**body, "context": {**body["context"], "auth": {"username": "u", "password": "hunter2"}}}
-    r = c.post("/api/v1/scrape", json=body_auth, headers={"X-Backend-Url": "https://backend.example"})
-    assert r.json()["data"]["auth"] == {"username": "u", "password": "hunter2"}
-    from scraper0.db.models import Job
-    from scraper0.db.session import session_scope
-    with session_scope() as s:
-        raw = json.dumps([j.input for j in s.query(Job).all()])
-    assert "hunter2" not in raw and "auth_enc" in raw
-    admin = login(app)
-    tid = next(t["id"] for t in admin.get("/v1/admin/tenants").json()["data"] if t["slug"] == "hashtaglocal")
-    jobs = admin.get("/v1/jobs", headers={"X-Tenant": tid}).json()["data"]
-    assert any(j["input"].get("auth") == "***" for j in jobs)
-
-
 def test_internal_run_requires_token(app):
     assert TestClient(app).post("/internal/jobs/x/run").status_code == 401
 
@@ -401,15 +339,11 @@ def test_ai_unavailable_is_reported_not_silent(app, site):
 
 
 def test_listing_events_without_urls_do_not_overwrite_each_other(app):
-    from scraper0.services.items import store_run_items
+    from scraper0.services.items import batch_keys
     evs = [{"name": "A", "start_time": "2099-12-01T04:30:00.000Z", "link": "https://ex.org/events"},
-           {"name": "B", "start_time": "2099-12-02T04:30:00.000Z", "link": "https://ex.org/events"},
            {"name": "B", "start_time": "2099-12-02T04:30:00.000Z", "link": "https://ex.org/events"}]
-    site = ("ex-org", "fetch_events")
-    assert store_run_items("t1", "event", evs, site=site) == {"created": 2, "updated": 0, "unchanged": 0}
-    assert store_run_items("t1", "event", evs, site=site)["unchanged"] == 2      # keys stable across runs
-    assert store_run_items("t1", "event", [{"name": "C", "start_time": "2099-12-03T04:30:00.000Z"}]) == \
-        {"created": 0, "updated": 0, "unchanged": 0}                            # no site → not stored
+    keys = batch_keys(evs)
+    assert len(set(keys)) == 2 and keys == batch_keys(evs)                   # distinct, and stable across runs
 
 
 def test_change_password(app):

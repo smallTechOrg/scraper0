@@ -34,3 +34,24 @@ def fresh_db(tmp_path):
     db_session.set_engine(eng)
     yield eng
     eng.dispose()
+
+
+def request_via_get(self, method, url, headers=None, data=None):
+    """Fetcher.request() for test fakes that only implement get(url) → (text, content_type) | None."""
+    from scraper0.core.fetch import HTTPResult
+    if method.upper() != "GET":
+        return HTTPResult(405, "", "text/plain")
+    got = self.get(url)
+    if got is None:
+        return HTTPResult(404, "not found", "text/plain")
+    return HTTPResult(200, got[0], got[1] or "text/html")
+
+
+def no_cookie(self, name):
+    return None
+
+
+def json_calls(pairs):
+    """[(url, body)] → RenderResult.requests for fake browsers: GET calls that returned JSON."""
+    from scraper0.core.render import CapturedRequest
+    return [CapturedRequest("GET", u, {"accept": "application/json"}, None, 200, "application/json", b) for u, b in pairs]

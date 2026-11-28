@@ -17,7 +17,6 @@ const groups: NavGroup[] = [
     label: "Configure",
     items: [
       { href: "/app/entities", label: "Entities" },
-      { href: "/app/recipes", label: "Learned layouts" },
       { href: "/app/ai", label: "AI" },
     ],
   },

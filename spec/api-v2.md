@@ -1,11 +1,10 @@
 # scraper0 API v2: sites and actions (build contract)
 
-**Onboarding only (v0.3):** this is the only way to scrape. There are no ad-hoc crawl, connector or upload jobs
-(`POST /v1/jobs` → 422); every site is onboarded, every action learned (or a code connector) and locked first.
-
-The exact contract that the scraper0 implementation, the scraper0 dashboard, hashtaglocal-backend and the hashtaglocal Ops UI
-are built against. The concepts and rationale are in [sites-and-actions.md](sites-and-actions.md). v1 endpoints
-(spec/api.md), including the legacy `POST /api/v1/scrape`, stay unchanged.
+The exact contract that the scraper0 implementation, the scraper0 dashboard, hashtaglocal-backend and the hashtaglocal
+Ops UI are built against. This is the only way to scrape: every site is onboarded, and every action is learned (or is
+a code connector) and locked first. The concepts and rationale are in [sites-and-actions.md](sites-and-actions.md),
+and how learned actions run is in [recipes.md](recipes.md). Tenants, jobs history, schedules and items are in
+[api.md](api.md).
 
 Auth and errors work as in v1:
 - **Auth:** `X-API-Key` for programs; a session plus `X-Requested-With: scraper0` for the dashboard.
@@ -57,8 +56,11 @@ Version  = {version, status: "draft"|"locked"|"retired"|"broken", created_at, lo
 Contract = {site_id, action, kind, version, input_schema, output_schema, endpoint, curl}
 ```
 
-- **Learned read actions** snapshot the recipes they use (`json_api` / `selectors` / structured data) into the version.
-  A locked version keeps working from its snapshot, even if the live recipes are later relearned for a draft.
+- **Learned read actions:** a version's `implementation_snapshot` holds its plans,
+  `{"implementation": "learned", "plans": [{"seed", "plan"}], "learn": {...}, "check_run": [RunStats]}`
+  ([recipes.md](recipes.md)). A locked version runs only its frozen plans: no browser, and no AI unless a plan step
+  declares it. The preview is the output of a cold run of those plans. Learned actions are reads of the built-in
+  `event` entity; anything else returns 422 `invalid_input`.
 - **Code actions** come from connectors and are seeded at startup as **locked version 1** (code is reviewed and tested):
 
 | site_id | base_url | action | kind | connector → action |
@@ -105,8 +107,8 @@ latitude, longitude, is_online, price, source_url}`, where times are ISO-8601 UT
 caller's `categories`, or `null` when none were sent.
 
 - **Shared store:** items are stored per (site, action), not per tenant, in the one `items` table (v1 `/v1/items`
-  lists the same rows). Every tenant reading a site sees the same items, and code connector runs on the site
-  (e.g. the legacy `/api/v1/scrape`) update them too. A read returns the items seen by the last successful v2 refresh only. Item `id` = `itm_` + the first 24 hex characters of sha256(site_id | action | item_key), where `item_key` is the canonical link,
+  lists the same rows). Every tenant reading a site sees the same items. A read returns the items seen by the last
+  successful refresh only. Item `id` = `itm_` + the first 24 hex characters of sha256(site_id | action | item_key), where `item_key` is the canonical link,
   or link + `#` + identity hash when several items share a link. It is stable for the life of the item. `updated_at`
   changes only when the item's content changes.
 - **Filtering per request:** `from`, `include_online`, then the AI filter and categories. AI verdicts are cached in
@@ -156,39 +158,30 @@ Idempotency-Key: hashtaglocal-issue-1234          // optional; default = sha256(
 `site_not_onboarded`, `action_not_available`, `action_exists`, `invalid_input`, `action_failed`, `outcome_unknown`,
 `forbidden`, `unauthenticated`.
 
-## Implementation notes and deviations (v0.2 build, 2026-11-26)
+## Behaviour details
 
-> Recorded by the implementation. Everything above is implemented as written; these are the places where the build
-> had to choose, extend or deviate. **Deviations** change documented behaviour; **clarifications** fill gaps.
-
-- **Deviation: learned versions that are not `json_api` are not frozen.** A locked `json_api` version refreshes from
-  its snapshot rules only (direct API call, no browser, no AI). A `selectors` / `structured` version refreshes by
-  crawling its seed URLs with the *live* shared recipe store (page cache → structured data → recipes → heuristic →
-  AI), because selector recipes are per page layout and a crawl can't be replayed from a fixed set. Its snapshot is
-  still recorded for review. `implementation_snapshot.strategy` says which applies.
-- **Deviation: learned actions are `kind: "read"` with a built-in entity (`event`) only.** `kind: "write"` → 422
-  `invalid_input` (writes are code only). Other entities → 422 `invalid_input`.
-- **Clarification: writes and timeouts.** The first call that times out returns 409 `outcome_unknown` (not 202).
+- **writes and timeouts.** The first call that times out returns 409 `outcome_unknown` (not 202).
   202 `running` is returned to a call with the same key while the first one is still running; it also carries
   `"replayed": true`. If the timed-out job later finishes, its record takes the real outcome (`succeeded` with output,
   or `failed` when it failed before the submit step), so a later replay returns that. Write `timeout_s` max is 600.
-- **Clarification: "submit step began"** is signalled by the connector through a progress event (`submitting…`, or
+- **"submit step began"** is signalled by the connector through a progress event (`submitting…`, or
   data `{"submit_started": true}`), persisted before the submit click. Failure or crash after it → `outcome_unknown`;
   before it → `failed` (422 `action_failed`, same key may re-run).
-- **Clarification: refresh jobs belong to the tenant whose read started them.** Another tenant that joins gets the same
+- **refresh jobs belong to the tenant whose read started them.** Another tenant that joins gets the same
   `refresh_job_id` but `GET /v1/jobs/{id}` returns 404 for it; just call read again.
-- **Clarification: what the store returns.** A read returns the items seen in the *last successful* scrape (items that
+- **what the store returns.** A read returns the items seen in the *last successful* scrape (items that
   disappeared from the site are not returned). The store keeps items whose end (or start) is yesterday (IST) or later.
   A run with 0 items after a run that had items counts as a failure and leaves the stored items untouched.
-- **Clarification: broken actions** keep serving stored items with `health: "broken"` and retry their refresh at most
+- **broken actions** keep serving stored items with `health: "broken"` and retry their refresh at most
   once an hour; a successful refresh, or locking a repaired version, makes them `locked` again.
-- **Clarification: learn / repair.** Both create a new draft version immediately (returned `version`), filled by the
-  job. A failed learn leaves that version `broken` with `preview.error`. On a code list action, learn/repair is a
-  verification run of the connector (draft code version). Lookup and write actions can't be learned → 422.
-- **Clarification: lock.** Unknown version → 404 `not_found`; a version still being learned or `broken` → 422
+- **learn / repair.** Both create a new draft version immediately (returned `version`), filled by the
+  job, and always look at the live site again. A failed learn (or a learned plan that produces no items when run
+  without AI) leaves that version `broken` with `preview.error`. On a code list action, learn or repair is a
+  verification run of the connector (draft code version). Lookup and write actions can't be learned: 422.
+- **lock.** Unknown version → 404 `not_found`; a version still being learned or `broken` → 422
   `invalid_input`. Locking resets freshness, so the next read refreshes with the new version.
-- **Clarification: categories.** If the model answers a category not in the caller's list, `OTHER` is used when the
+- **categories.** If the model answers a category not in the caller's list, `OTHER` is used when the
   list has it, else the last category. Verdicts are only cached when the AI answered.
-- **Extensions:** `Version` also has `job_id`; `Site.created_by_tenant` is the tenant slug (null for seeded sites);
+- **Extra fields:** `Version` also has `job_id`; `Site.created_by_tenant` is the tenant slug (null for seeded sites);
   versions are listed newest first; lookups run as a `connector` job (visible in `GET /v1/jobs/{id}`). Only list
   refreshes count towards `consecutive_failures` / broken (lookups and writes fail for caller reasons too).

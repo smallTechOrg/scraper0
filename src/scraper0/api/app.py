@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from scraper0 import __version__
-from scraper0.api import routes_admin, routes_jobs, routes_legacy, routes_public, routes_tenant, routes_v2
+from scraper0.api import routes_admin, routes_jobs, routes_public, routes_tenant, routes_v2
 from scraper0.api.deps import APIError, error_response, require_internal
 from scraper0.config import get_settings
 
@@ -59,8 +59,6 @@ def create_app(run_startup: bool = True) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def _validation(request: Request, e: RequestValidationError):
-        if request.url.path == "/api/v1/scrape":
-            return routes_legacy.legacy_error("invalid request body")
         msg = "; ".join(f"{'.'.join(str(x) for x in err['loc'][1:])}: {err['msg']}" for err in e.errors())[:500]
         return error_response(422, "invalid_input", msg or "invalid request")
 
@@ -73,7 +71,7 @@ def create_app(run_startup: bool = True) -> FastAPI:
         log.exception("unhandled", path=request.url.path)
         return error_response(500, "internal_error", "internal error")
 
-    for r in (routes_public, routes_tenant, routes_jobs, routes_admin, routes_legacy, routes_v2):
+    for r in (routes_public, routes_tenant, routes_jobs, routes_admin, routes_v2):
         app.include_router(r.router)
 
     @app.post("/internal/jobs/{job_id}/run")

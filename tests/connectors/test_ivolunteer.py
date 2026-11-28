@@ -75,18 +75,17 @@ def test_fetch_enriches_missing_address(fake_net, make_ctx):
 
 
 def test_fetch_with_filter(fake_net, make_ctx):
-    s = fake_net(_routes(fixture_text("ivolunteer_detail.html")), existing={iv.opp_link(OPPS[0])})
-    n = len(OPPS) - 1   # 21 new → batches 8, 8, 5
+    fake_net(_routes(fixture_text("ivolunteer_detail.html")))
+    n = len(OPPS)   # 22 → batches 8, 8, 6
 
     def reply(prompt):
         if "Teaching & Mentoring Volunteer-Mumbai" in prompt:   # third batch: pick the address-less one
-            return json.dumps([{"index": 4, "select_event": True, "type": "VOLUNTEERING"},
+            return json.dumps([{"index": 5, "select_event": True, "type": "VOLUNTEERING"},
                                {"index": 0, "select_event": True, "type": "WORKSHOP"}])
         return "[]"
     ai = FakeAI(reply)
     out = iv.fetch_events({"category_filter": "teaching"}, make_ctx(ai=ai))
-    assert len(ai.text_prompts) == 3 and n == 21
-    # the address-less pick is dropped after failed enrichment; index 0 of batch 3 = OPPS[17]
-    assert [e["name"] for e in out["events"]] == [OPPS[17]["Title"]]
+    assert len(ai.text_prompts) == 3 and n == 22
+    # the address-less pick is dropped after failed enrichment; index 0 of batch 3 = OPPS[16]
+    assert [e["name"] for e in out["events"]] == [OPPS[16]["Title"]]
     assert out["events"][0]["type"] == "WORKSHOP"
-    assert s.existing_calls == [("IVOLUNTEERIN", None)]

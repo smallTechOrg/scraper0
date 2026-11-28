@@ -102,8 +102,8 @@ def action_items(site_id: str, name: str, request: Request, q: str | None = None
         _call(sites_svc.get_action, s, site_id, name)
     if sort not in item_svc.SORTS:
         raise APIError(422, "invalid_input", f"sort must be one of {', '.join(item_svc.SORTS)}")
-    rows, total = item_svc.list_items(None, None, q, max(1, min(limit, 500)), max(0, offset), site_id=site_id,
-                                      action=name, sort=sort, shared_only=True)
+    rows, total = item_svc.list_items(None, q, max(1, min(limit, 500)), max(0, offset), site_id=site_id,
+                                      action=name, sort=sort)
     return {"data": rows, "total": total}
 
 

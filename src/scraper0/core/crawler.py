@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
@@ -43,7 +44,6 @@ class CrawlOptions:
     allow_llm: bool = True
     learn: bool = True
     use_cache: bool = True
-    relearn: bool = False                      # learn from the live site: ignore stored recipes and the page cache
     link_hint: re.Pattern | None = None        # regex on URL path: likely detail pages
     skip_links: set[str] = field(default_factory=set)
     progress: Callable[[str, dict], None] | None = None   # (message, data) after each page
@@ -61,6 +61,8 @@ class CrawlStats:
     by_method: dict = field(default_factory=dict)
     recipes_learned: int = 0
     llm_calls: int = 0
+    plan: dict | None = None                   # set when the site's API was learned as a plan
+    notes: list = field(default_factory=list)  # why something wasn't learned
 
     def bump(self, how: str):
         self.by_method[how] = self.by_method.get(how, 0) + 1
@@ -95,6 +97,7 @@ class Crawler:
     def __init__(self, store: Store, fetcher, llm, strong: Hook | None = None, weak: Hook | None = None):
         self.store, self.fetcher, self.llm = store, fetcher, llm
         self.strong, self.weak = strong, weak
+        self._plan_lock = threading.Lock()      # one plan learned per crawl, even with parallel page workers
 
     # ---------------------------------------------------------------- one page
     def extract_page(self, url: str, content: str, ctype: str, spec: EntitySpec, opts: CrawlOptions,
@@ -102,7 +105,7 @@ class Crawler:
         is_html = "<html" in content[:3000].lower() or "<body" in content.lower() or "html" in (ctype or "")
         key = f"{spec.key}@v{spec.version}"
         h = page_fingerprint(content, page_text(content)[0]) if is_html else content_hash(content)
-        if opts.use_cache and not opts.relearn:
+        if opts.use_cache:
             cached = _best_effort(self.store.cached_page, url, key, h)
             if cached is not None:
                 stats.bump("cache")
@@ -124,8 +127,8 @@ class Crawler:
             return [], "none"
 
         domain, pat = domain_of(url), path_pattern(url)
-        recipes = [] if opts.relearn else [r for r in self.store.recipes_for(domain, spec.key)
-                                           if r["strategy"] == "selectors" and pattern_matches(r["path_pattern"], url)]
+        recipes = [r for r in self.store.recipes_for(domain, spec.key)
+                   if r["strategy"] == "selectors" and pattern_matches(r["path_pattern"], url)]
         for r in recipes:
             if r["status"] != "active":
                 continue
@@ -175,6 +178,13 @@ class Crawler:
         if not got:
             return [], None
         stats.pages += 1
+        rr = got[2]
+        if rr is not None and stats.plan is None and getattr(rr, "requests", None):
+            with self._plan_lock:               # a rendered page deeper in the site can be the one calling the API
+                if stats.plan is None:
+                    learned = self._learn_api(url, spec, rr, opts, stats)
+                    if learned:
+                        return learned, got[0]
         items = self.extract_page(url, got[0], got[1], spec, opts, allow_llm, stats)
         if opts.progress:
             opts.progress(f"{url} → {len(items)} item(s)", {"pages": stats.pages, "llm_calls": stats.llm_calls,
@@ -201,85 +211,48 @@ class Crawler:
         stats.rendered += 1
         return rr.html, "text/html", rr
 
-    def _api_key(self, seed: str) -> str:
-        from urllib.parse import urlsplit
-        return "api:" + (urlsplit(seed).path.rstrip("/") or "/")
-
-    def _api_bodies(self, rules: dict, have: dict[str, str]) -> dict[str, str]:
-        bodies = dict(have)
-        for lk in (rules.get("lookups") or {}).values():
-            if lk["api_url"] not in bodies:
-                got = self.fetcher.get(lk["api_url"])
-                if got:
-                    bodies[lk["api_url"]] = got[0]
-        return bodies
-
-    def _api_items(self, spec: EntitySpec, rules: dict, body: str, seed: str, bodies: dict, recipe_id=None) -> list[dict]:
-        out = json_extract.items_from_rules(spec, rules, body, seed, bodies)
-        for item in out:
-            item["_meta"] = {"url": item.get("link") or seed, "extraction": "api", "recipe_id": recipe_id,
-                             "confidence": spec.score(item)}
-        return out
-
-    def _try_api_recipe(self, seed: str, spec: EntitySpec, stats: CrawlStats) -> list[dict] | None:
-        """A stored API recipe for this start URL: call the endpoint directly — no browser, no LLM."""
-        key = self._api_key(seed)
-        for r in self.store.recipes_for(domain_of(seed), spec.key):
-            if r["strategy"] != "json_api" or r["path_pattern"] != key or r["status"] != "active":
-                continue
-            got = self.fetcher.get(r["rules"]["api_url"])
-            items = []
-            if got:
-                try:
-                    items = self._api_items(spec, r["rules"], got[0], seed,
-                                            self._api_bodies(r["rules"], {r["rules"]["api_url"]: got[0]}), r["id"])
-                except ValueError:
-                    items = []
-            _best_effort(self.store.record_recipe_result, r["id"], bool(items))
-            if items:
-                stats.pages += 1
-                stats.bump("api_recipe")
-                return items
-        return None
-
     def _learn_api(self, seed: str, spec: EntitySpec, rr, opts: CrawlOptions, stats: CrawlStats) -> list[dict] | None:
-        """The rendered page fetched JSON: find the array holding this entity, learn the mapping, store it."""
-        if not rr.json_responses:
+        """The rendered page called an API (any method, any host): learn a plan for it. The plan, not the
+        browser, is what later runs use."""
+        calls = getattr(rr, "requests", None) or []
+        if not calls:
             return None
         from bs4 import BeautifulSoup
-        hrefs = [a["href"] for a in BeautifulSoup(rr.html, "html.parser").find_all("a", href=True)]
+
+        from scraper0.core import plan_learn, plans
+        soup = BeautifulSoup(rr.html, "html.parser")
+        base = rr.final_url or seed
+        from urllib.parse import urljoin
+        hrefs = [urljoin(base, a["href"]) for a in soup.find_all("a", href=True)]
+        imgs = [urljoin(base, i["src"]) for i in soup.find_all("img", src=True)]
+
         def counted_llm(prompt):
             stats.llm_calls += 1
             return self.llm(prompt)
-        rules = json_extract.learn_api_rules(spec, rr.json_responses, seed, hrefs,
-                                             counted_llm if opts.allow_llm else None)
-        if rules is None:
+        try:
+            plan, items, raw = plan_learn.learn_plan(spec, calls, seed, self.fetcher, hrefs, imgs,
+                                                     counted_llm if opts.allow_llm else None)
+        except plan_learn.LearnFailed as e:
+            log.info("plan_not_learned", seed=seed, reason=str(e)[:300])
+            stats.notes.append(str(e)[:300])
             return None
-        self._better_link(seed, rules, rr, hrefs)
-        bodies = dict(rr.json_responses)
-        items = self._api_items(spec, rules, bodies[rules["api_url"]], seed, bodies)
-        if not items:
-            return None
-        if opts.learn:
-            rid = _best_effort(self.store.save_recipe, domain_of(seed), self._api_key(seed), spec.key, "json_api",
-                               rules, seed, spec.version)
-            if rid:
-                stats.recipes_learned += 1
-                for item in items:
-                    item["_meta"]["recipe_id"] = rid
-                log.info("api_recipe_learned", seed=seed, api=rules["api_url"], fields=sorted(rules["mapping"]),
-                         by=rules.get("learned_by"))
+        if self._better_link(seed, plan, raw, rr, hrefs):
+            items, _ = plans.run_plan(plan, self.fetcher, spec, seed)
+        for item in items:
+            item["_meta"] = {"url": item.get("link") or seed, "extraction": "api", "confidence": spec.score(item)}
+        stats.plan = plan
+        stats.recipes_learned += 1
         stats.bump("api")
         return items
 
-    def _better_link(self, seed: str, rules: dict, rr, hrefs: list[str]) -> None:
+    def _better_link(self, seed: str, plan: dict, raw: list[dict], rr, hrefs: list[str]) -> bool:
         """A home page often links to items as '/list?scrollTo={id}' while the list page itself links to
         real detail pages ('/list/{slug}'). When the learned link has the item only in its query, render
         that list page once (learning time only) and prefer a detail-page link found there."""
-        template = rules.get("link_template")
+        template = plan.get("link_template")
         render = getattr(self.fetcher, "render", None)
         if render is None or not json_extract.link_in_query_only(template):
-            return
+            return False
         from urllib.parse import urljoin, urlsplit
 
         from bs4 import BeautifulSoup
@@ -288,23 +261,21 @@ class Crawler:
             more = render(listing)
         except Exception as e:  # noqa: BLE001 - best effort; the query link still works
             log.info("relink_render_failed", url=listing, error=str(e))
-            return
+            return False
         if more is None:
-            return
+            return False
         extra = [urljoin(more.final_url or listing, a["href"])
                  for a in BeautifulSoup(more.html, "html.parser").find_all("a", href=True)]
-        absolute = [urljoin(rr.final_url or seed, h) for h in hrefs]
-        if json_extract.relink(rules, rr.json_responses, absolute + extra):
-            log.info("link_template_improved", seed=seed, old=template, new=rules["link_template"])
+        better = json_extract.infer_link_template(raw, hrefs + extra)
+        if better and json_extract._template_rank(better) < json_extract._template_rank(template):
+            log.info("link_template_improved", seed=seed, old=template, new=better)
+            plan["link_template"] = better
+            return True
+        return False
 
     def crawl(self, seed: str, spec: EntitySpec, opts: CrawlOptions | None = None) -> tuple[list[dict], CrawlStats]:
         opts = opts or CrawlOptions()
         stats = CrawlStats()
-        api_items = None if opts.relearn else _best_effort(self._try_api_recipe, seed, spec, stats)
-        if api_items:
-            if opts.progress:
-                opts.progress(f"{seed} → {len(api_items)} item(s) from its API", {"pages": stats.pages})
-            return api_items, stats
         items: list[dict] = []
         seen, pool = set(), []
         page, n = seed, 0
@@ -318,13 +289,24 @@ class Crawler:
                 break
             html, ctype, rr = loaded
             stats.pages += 1
-            if rr is not None and n == 1:
-                learned = self._learn_api(seed, spec, rr, opts, stats)
+            if rr is not None and stats.plan is None:
+                learned = self._learn_api(page, spec, rr, opts, stats)
                 if learned:      # the page's own API is authoritative: no need to walk its links
                     if opts.progress:
-                        opts.progress(f"{seed} → {len(learned)} item(s) from its API", {"pages": stats.pages})
+                        opts.progress(f"{page} → {len(learned)} item(s) from its API", {"pages": stats.pages})
                     return learned, stats
             got = self.extract_page(page, html, ctype, spec, opts, allow_llm=rr is not None, stats=stats)
+            if not got and rr is None and n == 1 and opts.learn and getattr(self.fetcher, "render", None):
+                # Static HTML with no items can still load them by script (a search page calling a POST API):
+                # render it once while learning, to see what it fetches.
+                rr2 = self.fetcher.render(page)
+                if rr2 is not None:
+                    stats.rendered += 1
+                    learned = self._learn_api(page, spec, rr2, opts, stats)
+                    if learned:
+                        if opts.progress:
+                            opts.progress(f"{page} → {len(learned)} item(s) from its API", {"pages": stats.pages})
+                        return learned, stats
             if opts.progress:
                 opts.progress(f"{page} → {len(got)} item(s)", {"pages": stats.pages, "llm_calls": stats.llm_calls})
             items += got

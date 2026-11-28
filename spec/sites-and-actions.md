@@ -1,9 +1,7 @@
-# Sites and actions: the scraper0 contract (design, v0.2)
+# Sites and actions: the scraper0 contract (design)
 
-Status: agreed in discussion on 2026-11-26. Nothing below is built yet unless the "Exists today" column says so.
-
-> **Update (v0.3):** onboarding is now the only way in. Ad-hoc URL crawls, ad-hoc connector runs and uploads are
-> removed; schedules (`/v1/sources`) refresh locked site actions, and admins can "Refresh now" any locked list action.
+Onboarding is the only way in. Schedules (`/v1/sources`) refresh locked site actions, and admins can "Refresh now"
+any locked list action. How a learned action runs is in [recipes.md](recipes.md).
 
 ## The idea in one paragraph
 
@@ -112,26 +110,10 @@ Idempotency-Key: <caller key>      // optional; default = hash(site, action, nor
    issue id, so a retried report never files twice.
 6. **`EVENTS_SCRAPE_URL` and the portal URLs point at scraper0.** Production currently points at the *staging* web-scraper.
 
-Until steps 1–3 ship, #local keeps calling the legacy `POST /api/v1/scrape`, which stays supported.
-
-## Exists today vs. to build
-
-| Piece | Exists today (v0.1) | To build (v0.2) |
-|---|---|---|
-| Learned read recipes (HTML selectors, JSON API) | ✅ shared across tenants, auto-relearn | Bound to a site + action, versioned, lock/unlock |
-| Code connectors (BBMP, TeamEverest, MyBharat, iVolunteer) | ✅ | Registered as site actions (read/write declared) |
-| Sites as first-class records, onboarding UI, reuse of existing actions | ❌ | ✅ |
-| Lock → contract + curl | ❌ | ✅ |
-| Read with freshness + timeout + stored items | Partly: jobs, stored items, change feed | One call combining all three; `complete` flag |
-| Per-tenant categories and filter verdict cache | ❌ (hashtaglocal's list is hardcoded) | ✅ |
-| Idempotent writes, `outcome_unknown` | ❌ | ✅ |
-| Broken → repair → re-lock | Partly: auto-relearn exists, no lock/verification | ✅ |
-
 ## Open questions (deferred)
 
-- **Learned write workflows:** how a multi-step write (login → form → submit) is represented. Options include config, a
-  sequence of sub-actions, or generated code. And how a verified version stays frozen while still evolving. Until this is decided,
-  writes are code only.
+- **Learned write workflows:** multi-step writes (login → form → submit) will be plans with browser, session, captcha,
+  commit and verify steps (reserved in [recipes.md](recipes.md)). Until those exist, writes are code only.
 - **Knowledge durability:** learned implementations live in the database. If the database is lost, that knowledge is lost. One option: scraper0
   exports every locked version to a separate git repo it maintains, for history, review and disaster recovery.
 - **Defaults:** `freshness_hours` (proposed 48), `timeout_s` (proposed 60), and the `from` date default (today, in the site's

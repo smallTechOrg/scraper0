@@ -253,10 +253,7 @@ def enrich_missing_addresses(session, bind: dict, events: list[dict]) -> None:
 def select_events(opps: list[dict], ctx: ConnectorContext, event_filter: str, category_filter: str) -> list[dict]:
     if not (event_filter or category_filter):
         return [parse_opportunity(o) for o in opps]
-    existing = common.fetch_existing_links(PORTAL, ctx.backend_url)
-    new = [o for o in opps if opp_link(o) not in existing]
-    if len(opps) - len(new):
-        log.info("skip_existing", count=len(opps) - len(new))
+    new = opps
     events = []
     for opp, typ in common.filter_in_batches(ctx.ai, new, build_event_text, event_filter, category_filter,
                                              progress=ctx.progress, label="opportunities"):

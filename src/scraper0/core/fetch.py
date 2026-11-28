@@ -6,6 +6,7 @@ import ipaddress
 import socket
 import threading
 import time
+from dataclasses import dataclass, field
 from urllib import robotparser
 from urllib.parse import urljoin, urlsplit
 
@@ -31,6 +32,14 @@ def is_public_url(url: str) -> bool:
     except socket.gaierror:
         return False
     return all(ipaddress.ip_address(i[4][0]).is_global for i in infos)
+
+
+@dataclass
+class HTTPResult:
+    status: int
+    text: str
+    content_type: str
+    headers: dict = field(default_factory=dict)
 
 
 class Fetcher:
@@ -136,6 +145,49 @@ class Fetcher:
             log.info(f"{url}: HTTP {r.status_code}")
             return None
         return None
+
+    # -- any method (plans) ----------------------------------------------------
+    def request(self, method: str, url: str, headers: dict | None = None, data: str | bytes | None = None
+                ) -> HTTPResult | None:
+        """One request for a recipe plan (GET or POST; no cache). Same rules as get(): public URLs only (every
+        redirect hop too), robots.txt, per-host throttle, retries on 429/5xx. → HTTPResult (any status), or
+        None when blocked or unreachable. Never raises. Cookies persist in the session (warm-up requests)."""
+        method = method.upper()
+        if method not in ("GET", "POST"):
+            return None
+        if not is_public_url(url) or not self.allowed(url):
+            log.info("request_blocked", url=url)
+            return None
+        for attempt in range(self.retries + 1):
+            self._wait(url)
+            try:
+                if method == "GET":
+                    r = self._get_following(url, headers=headers or {})
+                else:
+                    r = self._session.post(url, data=data, headers=headers or {}, timeout=self.timeout,
+                                           allow_redirects=False)
+            except Exception as e:  # noqa: BLE001
+                log.info("request_failed", url=url, error=str(e)[:200], attempt=attempt + 1)
+                time.sleep(min(2 ** attempt, 8))
+                continue
+            if r.status_code in _RETRY_STATUS and attempt < self.retries:
+                try:
+                    wait = float(r.headers.get("retry-after", ""))
+                except ValueError:
+                    wait = 2 ** attempt
+                time.sleep(min(wait, 30))
+                continue
+            if len(r.content) > MAX_BYTES:
+                return None
+            return HTTPResult(r.status_code, r.text, r.headers.get("content-type", "").lower(),
+                              {k.lower(): v for k, v in r.headers.items()})
+        return None
+
+    def cookie(self, name: str) -> str | None:
+        try:
+            return self._session.cookies.get(name)
+        except Exception:  # noqa: BLE001
+            return None
 
     def _get_following(self, url: str, **kw):
         """Follow redirects manually so every hop passes the SSRF guard."""

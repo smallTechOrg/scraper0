@@ -170,22 +170,15 @@ def fetch_events(data: dict, ctx: ConnectorContext) -> dict:
         if not event_urls:
             return {"events": []}
 
-        existing = common.fetch_existing_links(PORTAL, ctx.backend_url)
         use_llm = bool(event_filter or category_filter)
         events: list[dict] = []
         for n, url in enumerate(event_urls, 1):
-            if _link_variants(url) & existing:
-                log.info("skip_existing", url=url)
-                continue
             resp = session.get(url, timeout=TIMEOUT, **bind)
             if resp.status_code != 200:
                 log.info("detail_not_ok", url=url, status=resp.status_code)
                 continue
             html = resp.text
             event = parse_event_detail(html, url)
-            if event["link"] in existing:
-                log.info("skip_existing", url=event["link"])
-                continue
             if use_llm:
                 page_text = BeautifulSoup(html, "html.parser").get_text(separator=" ", strip=True)
                 verdict = common.classify_single(ctx.ai, page_text, event_filter, category_filter)

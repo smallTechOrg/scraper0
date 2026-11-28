@@ -67,12 +67,10 @@ def test_fetch_paginates_and_dedupes_without_filter(fake_net, make_ctx):
     p1 = {"total": 14, "records": PAGE["records"]}
     p2 = {"total": 14, "records": PAGE["records"][:2]}   # duplicates of page 1 → deduped by id
     ongoing = {"total": 1, "records": PAGE["records"][:1]}
-    s = fake_net({mb.SEARCH_API: _search_route({"Upcoming": [p1, p2], "Ongoing": [ongoing]})},
-                 existing={mb.record_link(RECORDS[0])})
+    s = fake_net({mb.SEARCH_API: _search_route({"Upcoming": [p1, p2], "Ongoing": [ongoing]})})
     out = mb.fetch_events({}, make_ctx())
     assert len(out["events"]) == 12
-    assert out["events"][0] == mb.parse_record(RECORDS[0])   # no filter → legacy: no backend dedupe
-    assert s.existing_calls == []
+    assert out["events"][0] == mb.parse_record(RECORDS[0])
     assert len(s.calls) == 3
     kw = s.calls[0][2]
     assert kw["interface"] == "10.0.0.5" and kw["timeout"] == 15 and kw["headers"]["Origin"] == mb.BASE_URL
@@ -86,19 +84,17 @@ def test_pagination_cap(fake_net, make_ctx, monkeypatch):
     assert len(s.calls) == 6   # 3 pages × 2 tabs
 
 
-def test_fetch_with_filter_dedupes_then_batches(fake_net, make_ctx):
-    p1 = {"total": 12, "records": PAGE["records"]}
-    fake_net({mb.SEARCH_API: _search_route({"Upcoming": [p1]})},
-             existing={mb.record_link(RECORDS[0]), mb.record_link(RECORDS[1])})
-    # 10 new records → batches of 8 + 2
+def test_fetch_with_filter_batches(fake_net, make_ctx):
+    p1 = {"total": 10, "records": PAGE["records"][2:]}
+    fake_net({mb.SEARCH_API: _search_route({"Upcoming": [p1]})})
+    # 10 records → batches of 8 + 2
     ai = FakeAI([json.dumps([{"index": 0, "select_event": True, "type": "VOLUNTEERING"},
                              {"index": 5, "select_event": True, "type": "BOGUS"}]),
                  "this is not json"])
-    out = mb.fetch_events({"event_filter": "youth"}, make_ctx(ai=ai, backend_url="https://b"))
+    out = mb.fetch_events({"event_filter": "youth"}, make_ctx(ai=ai))
     assert [e["name"] for e in out["events"]] == [RECORDS[2]["event_name"], RECORDS[7]["event_name"]]
     assert [e["type"] for e in out["events"]] == ["VOLUNTEERING", "OTHER"]
     assert len(ai.text_prompts) == 2
-    assert RECORDS[0]["event_name"] not in ai.text_prompts[0]   # skipped before the LLM
 
 
 def test_fetch_error_maps_to_connector_error(fake_net, make_ctx):

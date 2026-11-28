@@ -28,7 +28,6 @@ def settings(monkeypatch):
     st = get_settings()
     monkeypatch.setattr(st, "bootstrap_admin_email", ADMIN[0])
     monkeypatch.setattr(st, "bootstrap_admin_password", SecretStr(ADMIN[1]))
-    monkeypatch.setattr(st, "bootstrap_legacy_tenant", "")
     return st
 
 
@@ -214,6 +213,7 @@ class ActsSite:
         site = self
 
         class F:
+            from conftest import no_cookie as cookie, request_via_get as request  # noqa: E402
             render_hosts = set()
 
             def get(self, url):
@@ -226,8 +226,10 @@ class ActsSite:
             def render(self, url):
                 site.renders += 1
                 cards = "".join(f'<a href="/activities?activity_id={a["id"]}">{a["name"]}</a>' for a in site.acts)
-                return RenderResult(html=f"<html><body>{cards}</body></html>", final_url=url,
-                                    json_responses=[("https://acts.org/api/activities", json.dumps(site.acts))])
+                from conftest import json_calls
+                jr = [("https://acts.org/api/activities", json.dumps(site.acts))]
+                return RenderResult(html=f"<html><body>{cards}</body></html>", final_url=url, json_responses=jr,
+                                    requests=json_calls(jr))
         return F()
 
 
@@ -250,7 +252,9 @@ def test_learn_lock_contract_and_read_from_snapshot(app, tenants, acts):
     assert v["status"] == "draft" and v["preview"]["count"] == 3 and len(v["preview"]["items"]) == 3
     assert v["preview"]["items"][0]["category"] is None and v["preview"]["items"][0]["name"] == "Ulsoor Lake Cleanup"
     snap = v["implementation_snapshot"]
-    assert snap["strategy"] == "json_api" and snap["recipes"][0]["rules"]["api_url"] == "https://acts.org/api/activities"
+    [entry] = snap["plans"]
+    step = entry["plan"]["steps"][0]
+    assert step["type"] == "request" and step["url"] == "https://acts.org/api/activities"
     assert acts.renders == 2           # the page, plus its /activities list page once (looking for detail links)
 
     c = acme.post("/v2/sites/acts-org/actions/fetch_events/versions/1/lock", headers=H).json()["data"]
@@ -258,11 +262,7 @@ def test_learn_lock_contract_and_read_from_snapshot(app, tenants, acts):
     assert '"X-API-Key: $SCRAPER0_API_KEY"' in c["curl"] and '"freshness_hours": 48' in c["curl"]
     assert acme.get("/v2/sites/acts-org/actions/fetch_events").json()["data"]["status"] == "locked"
 
-    # the live recipe is relearned/broken later: the locked version keeps working from its snapshot
-    from scraper0.core.store import default_store
-    for rec in default_store().list_recipes("acts.org"):
-        default_store().save_recipe(rec["domain"], rec["path_pattern"], rec["entity"], "json_api",
-                                    {"api_url": "https://acts.org/api/gone", "mapping": {}}, rec["sample_url"])
+    # the locked version runs its frozen plan: no browser, no AI
     d = read(key, site="acts-org").json()["data"]
     assert d["complete"] is True and d["refresh_job_id"] and d["health"] == "ok" and d["version"] == 1
     assert [i["data"]["name"] for i in d["items"]] == ["Ulsoor Lake Cleanup", "Cubbon Tree Walk"]   # online dropped
@@ -612,7 +612,7 @@ def test_rerun_bumps_last_seen_not_updated(app, tenants, everest):
     assert j1["result"]["stored"] == {"created": 4, "updated": 0, "unchanged": 0}     # the past one is not stored
     first = by_name(acme.get("/v1/items").json()["data"])
     lake = first["Lake Cleanup"]
-    assert lake["site_id"] == "teameverest-ngo" and lake["action"] == "fetch_events" and lake["private"] is False
+    assert lake["site_id"] == "teameverest-ngo" and lake["action"] == "fetch_events"
     time.sleep(0.02)
     j2 = connector_job(zed)                                                  # another tenant, same site: same rows
     assert j2["result"]["stored"] == {"created": 0, "updated": 0, "unchanged": 4}
@@ -650,7 +650,7 @@ def test_items_and_change_feed_are_shared_across_tenants(app, tenants, everest):
     acme, zed = tenants["acme"], tenants["zed"]
     connector_job(zed)
     mine, theirs = acme.get("/v1/items").json(), zed.get("/v1/items").json()
-    assert mine["total"] == theirs["total"] == 4 and all(i["private"] is False for i in mine["data"])
+    assert mine["total"] == theirs["total"] == 4
     feed_a = acme.get("/v1/items/changes").json()["data"]
     feed_z = zed.get("/v1/items/changes").json()["data"]
     assert len(feed_a) == len(feed_z) == 4 and {c["item"]["id"] for c in feed_z} == {c["item"]["id"] for c in feed_a}
@@ -659,8 +659,17 @@ def test_items_and_change_feed_are_shared_across_tenants(app, tenants, everest):
 def test_items_filters_and_sort(app, tenants, everest):
     acme = tenants["acme"]
     connector_job(acme)
-    from scraper0.services.items import store_run_items
-    store_run_items(None, "event", [{"name": "Elsewhere Walk", "start_time": day(2), "link": "https://other.org/e/1"}])
+    from scraper0.services.site_runs import store_items
+    from scraper0.services.sites import seed_code_actions
+    seed_code_actions()
+    with session_scope() as s:                                               # a second site with one item
+        from scraper0.db.models import Site, SiteAction
+        s.add(Site(site_id="other-org", base_url="https://other.org", name="other.org"))
+        s.add(SiteAction(site_id="other-org", name="fetch_events", kind="read", entity="event",
+                         implementation="learned", mode="list", seed_urls=["https://other.org"], status="locked"))
+    time.sleep(0.01)
+    store_items("other-org", "fetch_events", 1, "j", [{"name": "Elsewhere Walk", "start_time": day(2),
+                                                       "link": "https://other.org/e/1"}])
     assert acme.get("/v1/items?site=teameverest-ngo").json()["total"] == 4
     assert acme.get("/v1/items?site=other-org&action=fetch_events").json()["total"] == 1
     assert acme.get("/v1/items?action=nope").json()["total"] == 0
@@ -668,10 +677,6 @@ def test_items_filters_and_sort(app, tenants, everest):
     assert acme.get("/v1/items?sort=bogus").status_code == 422
     sites = {s["site_id"]: s["items"] for s in acme.get("/v1/items/sites").json()["data"]}
     assert sites == {"other-org": 1, "teameverest-ngo": 4}
-    with session_scope() as s:                                               # a v1 run registers the site, no actions
-        from scraper0.db.models import Site
-        assert s.get(Site, "other-org") is not None
-    assert acme.get("/v2/sites/other-org").json()["data"]["actions"] == []
     page = acme.get("/v2/sites/teameverest-ngo/actions/fetch_events/items?limit=2&sort=updated").json()
     assert page["total"] == 4 and len(page["data"]) == 2
     assert acme.get("/v2/sites/teameverest-ngo/actions/nope/items").status_code == 404
@@ -741,3 +746,32 @@ def test_items_stored_before_the_expiry_field_still_rescrape(app, tenants, evere
     _age_last_scrape(20)
     d = read(tenants["acme_key"]).json()["data"]
     assert everest.calls == 2 and d["items"][0]["data"]["image_expires_at"]
+
+
+def test_locked_learned_version_refreshes_with_zero_ai_and_failures_keep_items(app, tenants, acts, monkeypatch):
+    """Minimum AI: learning may use AI; a locked plan's refresh never does. A failing plan is a failed refresh:
+    stored items stay, and it counts toward broken."""
+    acme, key = tenants["acme"], tenants["acme_key"]
+    acme.post("/v2/sites", json={"base_url": "https://acts.org"}, headers=H)
+    acme.post("/v2/sites/acts-org/actions", json={"name": "fetch_events", "kind": "read", "entity": "event"}, headers=H)
+    acme.post("/v2/sites/acts-org/actions/fetch_events/learn", headers=H)
+    acme.post("/v2/sites/acts-org/actions/fetch_events/versions/1/lock", headers=H)
+
+    def no_ai(self, *a, **k):
+        raise AssertionError("a locked plan must not call the AI")
+    monkeypatch.setattr("scraper0.services.ai.AIClient._call", no_ai)
+    renders = acts.renders
+    r = acme.post("/v2/sites/acts-org/actions/fetch_events/refresh", headers=H)
+    job = acme.get(f"/v1/jobs/{r.json()['data']['job_id']}").json()["data"]
+    assert job["status"] == "succeeded" and job["result"]["ai"]["calls"] == 0 and acts.renders == renders
+    [run] = job["result"]["plan_runs"]
+    assert run["ai_calls"] == 0 and run["entry"] == "direct" and run["outcomes"]["list"] == "ok"
+    before = read(key, site="acts-org").json()["data"]["items"]
+
+    acts.acts = []                                                           # the API now returns nothing
+    r = acme.post("/v2/sites/acts-org/actions/fetch_events/refresh", headers=H)
+    job = acme.get(f"/v1/jobs/{r.json()['data']['job_id']}").json()["data"]
+    assert job["status"] == "failed" and "expect failed" in job["error"]
+    a = acme.get("/v2/sites/acts-org/actions/fetch_events").json()["data"]
+    assert a["consecutive_failures"] == 1
+    assert [i["id"] for i in read(key, site="acts-org").json()["data"]["items"]] == [i["id"] for i in before]

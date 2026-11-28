@@ -154,19 +154,6 @@ export interface EntitySpec {
   builtin: boolean;
 }
 
-export interface Recipe {
-  id: string;
-  domain: string;
-  path_pattern: string;
-  entity: string;
-  rules: unknown;
-  sample_url: string | null;
-  successes: number;
-  failures: number;
-  status: string;
-  updated_at: ISODate;
-}
-
 /** `actions` is not typed in the spec; we accept plain names or {name, description}. */
 export type ConnectorAction = string | { name: string; description?: string };
 
@@ -292,16 +279,16 @@ export interface SourceCreate {
 }
 
 /**
- * One stored item. Site items (site_id + action) are shared by every tenant and updated by whichever run
- * scrapes that site; private items (uploads, tenant-defined entities) belong to one tenant.
+ * One stored item. Items belong to a site + action and are shared by every tenant; every refresh of that
+ * action updates them.
  */
 export interface Item {
   id: string;
   entity: string;
   item_key: string;
   data: Record<string, unknown>;
-  site_id: string | null;
-  action: string | null;
+  site_id: string;
+  action: string;
   /** The last job that saw it. */
   job_id: string | null;
   first_seen_at: ISODate;
@@ -309,7 +296,6 @@ export interface Item {
   last_seen_at: ISODate;
   /** Its content last changed. */
   updated_at: ISODate;
-  /** Same as updated_at (kept for older clients). */
   changed_at: ISODate;
 }
 
@@ -742,10 +728,7 @@ export const api = {
     data<EntitySpec>(`/v1/entities/${enc(name)}`, { method: "PUT", body }),
   deleteEntity: (name: string) => request<void>(`/v1/entities/${enc(name)}`, { method: "DELETE" }),
 
-  recipes: (query?: { domain?: string; entity?: string }) => data<Recipe[]>("/v1/recipes", { query }),
-  deleteRecipe: (id: string) => request<void>(`/v1/recipes/${enc(id)}`, { method: "DELETE" }),
 
-  connectors: () => data<Connector[]>("/v1/connectors"),
 
   // Jobs (history; every scrape runs through a site action)
   jobs: (query?: { status?: string; kind?: string; limit?: number; before?: string }) =>

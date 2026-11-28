@@ -10,6 +10,7 @@ from scraper0.core.recipes import path_pattern, pattern_matches
 
 
 class FakeFetcher:
+    from conftest import no_cookie as cookie, request_via_get as request  # noqa: E402
     def __init__(self, pages): self.pages, self.calls = pages, []
     def get(self, url):
         self.calls.append(url)
@@ -106,19 +107,14 @@ def test_second_crawl_uses_page_cache(store):
     assert llm.calls == 0 and stats.by_method.get("cache") == 3 and len(items) == 3
 
 
-def test_recipe_survives_restart(tmp_path):
-    from scraper0.db import session as db_session
-    from scraper0.db.models import Base
-    url = f"sqlite:///{tmp_path}/s.db"
-    eng = db_session.make_engine(url)
-    Base.metadata.create_all(eng)
-    db_session.set_engine(eng)
-    crawler(Store(), site(), FakeLLM()).crawl("https://ex.org/events", EVENT_SPEC, opts(use_cache=False))
-    eng.dispose()
-    db_session.set_engine(db_session.make_engine(url))      # "restart": brand-new engine on the same file
-    llm = FakeLLM()
-    crawler(Store(), site(), llm).crawl("https://ex.org/events", EVENT_SPEC, opts(use_cache=False))
-    assert llm.calls == 0
+def test_learned_layout_becomes_a_plan_that_runs_without_ai(store):
+    """Learn once (one AI call), freeze it as a plan, then scrape again with no AI at all."""
+    from scraper0.core import plans
+    items, _ = crawler(store, site(), FakeLLM()).crawl("https://ex.org/events", EVENT_SPEC, opts(use_cache=False))
+    layouts = [r for r in store.list_recipes("ex.org") if r["strategy"] == "selectors"]
+    plan = plans.from_selectors(layouts, "https://ex.org/events", patterns=["/events/*"])
+    again, run = plans.run_plan(plan, FakeFetcher(site()), EVENT_SPEC, "https://ex.org/events")
+    assert run.ai_calls == 0 and sorted(i["name"] for i in again) == sorted(i["name"] for i in items)
 
 
 def test_layout_change_triggers_relearn_and_keeps_fallbacks(store):

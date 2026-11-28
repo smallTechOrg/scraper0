@@ -36,7 +36,6 @@ class ConnectorContext:
     tenant_id: str
     ai: AI
     state: StateStore
-    backend_url: str | None = None          # caller's backend, validated against the allowlist (dedupe callbacks)
     auth: dict | None = None                # {"username": ..., "password": ...} when the action needs a portal login
     progress: Callable[[str, dict], None] = lambda message, data=None: None   # job progress events
 

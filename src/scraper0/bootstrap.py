@@ -1,5 +1,5 @@
-"""Startup: migrate, then seed what an empty install needs (platform admin, shared Groq provider,
-legacy tenant). Every step is idempotent."""
+"""Startup: migrate, then seed what an empty install needs (platform admin, shared Groq provider, code actions).
+Every step is idempotent."""
 from __future__ import annotations
 
 import os
@@ -8,7 +8,7 @@ import structlog
 from sqlalchemy import select
 
 from scraper0.config import REPO_ROOT, get_settings
-from scraper0.db.models import AIProvider, Tenant, User
+from scraper0.db.models import AIProvider, User
 from scraper0.db.session import get_engine, session_scope
 
 log = structlog.get_logger(__name__)
@@ -51,10 +51,6 @@ def seed() -> None:
                                              "price_in_per_mtok": GROQ_PRICES[0], "price_out_per_mtok": GROQ_PRICES[1],
                                              "is_default": True})
             log.info("bootstrap_groq_provider_created")
-        slug = (st.bootstrap_legacy_tenant or "").strip()
-        if slug and s.scalar(select(Tenant).where(Tenant.slug == slug)) is None:
-            s.add(Tenant(slug=slug, name=slug, monthly_ai_budget_usd=50.0))
-            log.info("bootstrap_tenant_created", slug=slug)
     from scraper0.services.sites import seed_code_actions
     seed_code_actions()          # v2: connector actions as locked version 1
 

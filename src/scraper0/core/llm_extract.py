@@ -70,8 +70,9 @@ def _parse_json(raw: str):
     return json.loads(m.group(0) if m else t)
 
 
-def llm_extract(html: str, url: str, spec: EntitySpec, llm: LLMFn) -> list[tuple[dict, dict]]:
-    """→ [(item with coerced values, sources per field)]. Empty list when nothing found/failed."""
+def llm_extract(html: str, url: str, spec: EntitySpec, llm: LLMFn, require_valid: bool = True) -> list[tuple[dict, dict]]:
+    """→ [(item with coerced values, sources per field)]. Empty list when nothing found/failed. With
+    require_valid=False partial items are returned too (an `ai` plan step filling a few fields)."""
     text, images, _ = page_text(html)
     if len(text) < 60:
         return []
@@ -107,6 +108,6 @@ def llm_extract(html: str, url: str, spec: EntitySpec, llm: LLMFn) -> list[tuple
                 item[fname] = v
                 if src:
                     sources[fname] = src
-        if not spec.validate(item):
+        if item and (not require_valid or not spec.validate(item)):
             out.append((item, sources))
     return out

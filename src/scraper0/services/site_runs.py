@@ -7,7 +7,6 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlsplit
 
 import structlog
 from sqlalchemy import select, update
@@ -99,10 +98,6 @@ def _fetcher():
     return execute._fetcher()
 
 
-def _api_key(seed: str) -> str:
-    return "api:" + (urlsplit(seed).path.rstrip("/") or "/")
-
-
 def run_code(connector: str, connector_action: str, tenant_id: str, rep, ai, data: dict | None = None,
              auth: dict | None = None) -> dict:
     from scraper0.connectors.base import ConnectorContext, ConnectorError, get
@@ -121,97 +116,85 @@ def run_code(connector: str, connector_action: str, tenant_id: str, rep, ai, dat
         raise ScrapeFailed(f"AI unavailable: {e}") from e
 
 
-def crawl_learned(seeds: list[str], portal: str, rep, ai) -> tuple[list[dict], dict]:
-    """Engine over the seed URLs, re-learning from the live site (stored recipes and cached pages are ignored,
-    then replaced) → (events, merged by_method). Used by learn and repair, so both really look at the site again."""
-    from scraper0.core.store import default_store
+def _structured(portal: str):
+    """JSON-LD / microdata reader handed to plan runs (no AI)."""
+    from scraper0.events.engine import event_to_item
+    from scraper0.events.extractors import extract_all
+
+    def read(html: str, url: str) -> list[dict]:
+        return [event_to_item(e) for e in extract_all(html, url, portal, "text/html", heuristic=False)]
+    return read
+
+
+def learn_plans(seeds: list[str], portal: str, rep, ai) -> dict:
+    """Learn the site from its seed URLs (AI allowed) → the version's implementation snapshot:
+    {"implementation": "learned", "plans": [{"seed", "plan"}], "learn": {...}}. Each seed yields one plan:
+    the API plan when the page loads its data from one, else list page → detail pages with the layout rules
+    worked out during this learn. Every plan is then run cold (no browser, no AI) and must produce items."""
+    from scraper0.core import plans
+    from scraper0.core.recipes import domain_of, path_pattern
     from scraper0.events.engine import Engine, Options
-    eng = Engine(_fetcher(), llm=ai.text_fn("extract"), filter_llm=ai.text_fn("filter"), store=default_store())
-    res = eng.run(seeds, Options(portal=portal, include_past=True, include_online=True, learn=True, relearn=True,
-                                 use_llm_extraction=True, progress=rep, cancelled=rep.cancelled))
-    errors = res["stats"].get("errors") or []
-    if errors and len(errors) == len(seeds):
-        raise ScrapeFailed("; ".join(f"{e['source']}: {e['error']}" for e in errors)[:500])
-    by_method: dict = {}
-    for c in eng.last_crawl_stats:
-        for k, n in (c.get("by_method") or {}).items():
-            by_method[k] = by_method.get(k, 0) + n
-    return trim_old(res["events"]), by_method
-
-
-def snapshot_for(seeds: list[str], by_method: dict) -> dict:
-    """The recipes this learn used, frozen into the version."""
-    from scraper0.core.recipes import domain_of
-    from scraper0.core.store import default_store
-    recipes = []
-    for domain in dict.fromkeys(domain_of(u) for u in seeds):
-        recipes += [r for r in default_store().recipes_for(domain, EVENT_SPEC.key) if r["status"] == "active"]
-    keys = {(domain_of(u), _api_key(u)) for u in seeds}
-    api = [r for r in recipes if r["strategy"] == "json_api" and (r["domain"], r["path_pattern"]) in keys]
-    sel = [r for r in recipes if r["strategy"] == "selectors"]
-    if api and (by_method.get("api") or by_method.get("api_recipe")):
-        strategy, used = "json_api", api
-    elif sel:
-        strategy, used = "selectors", sel
-    else:
-        strategy, used = "structured", []
-    return {"implementation": "learned", "strategy": strategy, "entity": EVENT_SPEC.name, "seed_urls": list(seeds),
-            "by_method": by_method,
-            "recipes": [{"recipe_id": r["id"], "domain": r["domain"], "path_pattern": r["path_pattern"],
-                         "strategy": r["strategy"], "rules": r["rules"], "sample_url": r["sample_url"],
-                         "spec_version": r["spec_version"]} for r in used]}
-
-
-def run_json_api_snapshot(snapshot: dict, seeds: list[str], portal: str, rep) -> list[dict]:
-    """A locked json_api version runs from its frozen rules: call the API directly (no browser, no AI)."""
-    from scraper0.core import json_extract
-    from scraper0.core.recipes import domain_of
     fetcher = _fetcher()
-    raw: list[dict] = []
-    used = 0
+    eng = Engine(fetcher, llm=ai.text_fn("extract"), filter_llm=ai.text_fn("filter"))
+    out, notes, by_method = [], [], {}
     for seed in seeds:
-        r = next((r for r in snapshot.get("recipes") or [] if r["strategy"] == "json_api"
-                  and r["domain"] == domain_of(seed) and r["path_pattern"] == _api_key(seed)), None)
-        if r is None:
-            continue
-        used += 1
-        rules = r["rules"]
-        got = fetcher.get(rules["api_url"])
-        if not got:
-            raise ScrapeFailed(f"API {rules['api_url']} did not respond")
-        bodies = {rules["api_url"]: got[0]}
-        for lk in (rules.get("lookups") or {}).values():
-            if lk["api_url"] not in bodies:
-                g = fetcher.get(lk["api_url"])
-                if g:
-                    bodies[lk["api_url"]] = g[0]
+        eng.last_crawl_stats = []
+        events = eng.run([seed], Options(portal=portal, include_past=True, include_online=True, learn=True,
+                                         use_llm_extraction=True, progress=rep, cancelled=rep.cancelled))["events"]
+        stats = eng.last_crawl_stats[0] if eng.last_crawl_stats else {}
+        for k, n in (stats.get("by_method") or {}).items():
+            by_method[k] = by_method.get(k, 0) + n
+        notes += stats.get("notes") or []
+        plan = stats.get("plan")
+        if plan is None:
+            pats = sorted({path_pattern(e.get("source_url") or e.get("link")) for e in events
+                           if (e.get("source_url") or e.get("link")) and
+                           domain_of(e.get("source_url") or e.get("link")) == domain_of(seed)} - {path_pattern(seed)})
+            if not pats:
+                notes.append(f"{seed}: no detail pages with items were found")
+                continue
+            layouts = [r for r in eng.store.recipes_for(domain_of(seed), EVENT_SPEC.key) if r["strategy"] == "selectors"]
+            plan = plans.from_selectors(layouts, seed, patterns=pats,
+                                        navigate=plans.learn_navigate(fetcher, seed))
+        out.append({"seed": seed, "plan": plan})
+    if not out:
+        raise ScrapeFailed("nothing could be learned: " + ("; ".join(notes)[:400] or "no items found"))
+    return {"implementation": "learned", "entity": EVENT_SPEC.name, "seed_urls": list(seeds), "plans": out,
+            "learn": {"by_method": by_method, "ai_calls": ai.calls, "notes": notes}}
+
+
+def run_plans(snapshot: dict, portal: str, rep, ai) -> tuple[list[dict], list[dict]]:
+    """Run a learned version's plans → (normalised events, per-plan run stats). No browser; AI only in plan steps
+    that declare it."""
+    from scraper0.core import plans
+    fetcher = _fetcher()
+    raw, runs = [], []
+    for entry in snapshot.get("plans") or []:
         try:
-            items = json_extract.items_from_rules(EVENT_SPEC, rules, got[0], seed, bodies)
-        except (ValueError, KeyError, TypeError) as e:
-            raise ScrapeFailed(f"API {rules['api_url']} returned unexpected data: {e}") from e
+            items, st = plans.run_plan(entry["plan"], fetcher, EVENT_SPEC, entry["seed"], structured=_structured(portal),
+                                       progress=rep, ai=ai)
+        except plans.PlanError as e:
+            raise ScrapeFailed(f"{entry['seed']}: {e}") from e
         for it in items:
-            it["_meta"] = {"url": it.get("link") or seed, "extraction": "api", "confidence": EVENT_SPEC.score(it)}
+            it.setdefault("_meta", {"url": it.get("link") or entry["seed"], "extraction": "plan"})
         raw += items
-        rep(f"{seed} → {len(items)} item(s) from its API", {"pages": used})
-    if not used:
-        raise ScrapeFailed("the locked version has no API recipe for its seed URLs")
-    return normalise(raw, portal)
+        runs.append({"seed": entry["seed"], **st.as_dict()})
+        rep(f"{entry['seed']} → {len(items)} item(s)", {"pages": st.pages})
+    if not snapshot.get("plans"):
+        raise ScrapeFailed("this version has no plan: run repair to learn one")
+    return normalise(raw, portal), runs
 
 
-def scrape_version(action: dict, snapshot: dict, tenant_id: str, rep, ai) -> list[dict]:
-    """Run one version of a list action → normalised event dicts."""
+def scrape_version(action: dict, snapshot: dict, tenant_id: str, rep, ai) -> tuple[list[dict], list[dict]]:
+    """Run one version of a list action → (normalised event dicts, run stats)."""
     portal = action["site_id"].upper()
     if action["implementation"] == "code":
         out = run_code(action["connector"], action["connector_action"], tenant_id, rep, ai, data={})
         events = out.get("events") if isinstance(out, dict) else None
         if not isinstance(events, list):
             raise ScrapeFailed("connector returned no events list")
-        return normalise(events, events[0].get("portal") or portal if events else portal)
-    seeds = snapshot.get("seed_urls") or action["seed_urls"]
-    if snapshot.get("strategy") == "json_api":
-        return run_json_api_snapshot(snapshot, seeds, portal, rep)
-    # selectors / structured data: crawl with the shared recipe store (see NOTES: not frozen to the snapshot)
-    return crawl_learned(seeds, portal, rep, ai)[0]
+        return normalise(events, events[0].get("portal") or portal if events else portal), []
+    return run_plans(snapshot, portal, rep, ai)
 
 
 # ------------------------------------------------------------------ job entry
@@ -244,10 +227,13 @@ def learn(job_id: str, tenant_id: str, inp: dict, rep, ai) -> dict:
     try:
         if a["implementation"] == "code":
             snapshot = {"implementation": "code", "connector": a["connector"], "action": a["connector_action"]}
-            events = scrape_version(a, snapshot, tenant_id, rep, ai)
         else:
-            events, by_method = crawl_learned(a["seed_urls"], a["site_id"].upper(), rep, ai)
-            snapshot = snapshot_for(a["seed_urls"], by_method)
+            snapshot = learn_plans(a["seed_urls"], a["site_id"].upper(), rep, ai)
+        events, runs = scrape_version(a, snapshot, tenant_id, rep, ai)     # the preview is what refreshes will do
+        if a["implementation"] != "code" and not events:
+            raise ScrapeFailed("the learned plan produced no items when run without AI")
+        if runs:
+            snapshot["check_run"] = runs
         preview = _preview(events)
     except Exception as e:
         msg = str(e)[:500] or type(e).__name__
@@ -278,7 +264,7 @@ def refresh(job_id: str, tenant_id: str, inp: dict, rep, ai) -> dict:
             version, snapshot = v.version, dict(v.implementation_snapshot or {})
         a = _action_dict(site_id, name)
         try:
-            events = scrape_version(a, snapshot, tenant_id, rep, ai)
+            events, runs = scrape_version(a, snapshot, tenant_id, rep, ai)
         except Exception as e:
             record_failure(site_id, name, str(e)[:500] or type(e).__name__)
             if isinstance(e, ScrapeFailed):
@@ -288,7 +274,10 @@ def refresh(job_id: str, tenant_id: str, inp: dict, rep, ai) -> dict:
         if stored is None:
             raise JobFailed("0 valid items (the last run had some)")
         rep(f"{len(events)} item(s) stored", {"items": len(events)}, force=True)
-        return {"site_id": site_id, "action": name, "version": version, "count": len(events), "stored": stored}
+        out = {"site_id": site_id, "action": name, "version": version, "count": len(events), "stored": stored}
+        if runs:
+            out["plan_runs"] = runs
+        return out
     finally:
         with session_scope() as s:
             s.execute(update(SiteAction).where(SiteAction.site_id == site_id, SiteAction.name == name,
@@ -331,7 +320,7 @@ def _store(site_id, name, version, job_id, payload) -> dict:
         a = sites_svc.get_action(s, site_id, name)
         seq = (a.scrape_seq or 0) + 1
         counts = items_svc.upsert_rows(s, payload, entity_key=EVENT_SPEC.key, site_id=site_id, action=name,
-                                       tenant_id=None, job_id=job_id, seq=seq)
+                                       job_id=job_id, seq=seq)
         t = now()
         a.scrape_seq, a.last_scraped_at, a.last_success_at = seq, t, t
         a.last_item_count, a.consecutive_failures, a.last_error = len(payload), 0, None

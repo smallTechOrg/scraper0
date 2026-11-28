@@ -114,7 +114,7 @@ def images_expiring(s, site_id: str, name: str, seq: int) -> bool:
         return False
     soon = now() + IMAGE_EXPIRY_MARGIN
     for data in s.scalars(select(Item.data).where(Item.site_id == site_id, Item.action == name,
-                                                   Item.tenant_id.is_(None), Item.seen_seq == seq)):
+                                                   Item.seen_seq == seq)):
         exp = image_expiry(data)
         if exp is not None and exp <= soon:
             return True
@@ -359,7 +359,7 @@ def read_list(tenant_id: str, site_id: str, name: str, body: dict) -> dict:
         rows = [] if seq == 0 else [
             {"id": i.id, "updated_at": _iso(i.updated_at), "content_hash": i.content_hash, "data": dict(i.data)}
             for i in s.scalars(select(Item).where(Item.site_id == site_id, Item.action == name,
-                                                  Item.tenant_id.is_(None), Item.seen_seq == seq))]
+                                                  Item.seen_seq == seq))]
     rows = [r for r in rows if _starts_on_or_after(r["data"], o["from"])
             and (o["include_online"] or not r["data"].get("is_online"))]
     rows.sort(key=lambda r: (r["data"].get("start_time") or "9999", r["data"].get("name") or "", r["id"]))

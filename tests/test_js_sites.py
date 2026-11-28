@@ -2,6 +2,7 @@
 import json
 
 import pytest
+from conftest import json_calls
 
 from scraper0.core import Crawler, CrawlOptions, EntitySpec, FieldSpec, Store
 from scraper0.core import json_extract as jx
@@ -37,6 +38,7 @@ def rendered_html(url="https://acts.org/"):
 
 
 class JSFetcher:
+    from conftest import no_cookie as cookie, request_via_get as request  # noqa: E402
     """Static HTML is an empty shell; render() returns the real DOM plus the JSON the page fetched."""
     def __init__(self, acts=None, api_up=True, has_browser=True):
         self.acts = acts if acts is not None else ACTS
@@ -57,9 +59,9 @@ class JSFetcher:
 
     def render(self, url):
         self.renders.append(url)
-        return RenderResult(html=rendered_html(url), final_url=url, json_responses=[
-            ("https://acts.org/api/changemakers", json.dumps(ORGS)),
-            ("https://acts.org/api/activities", json.dumps(self.acts))])
+        jr = [("https://acts.org/api/changemakers", json.dumps(ORGS)),
+              ("https://acts.org/api/activities", json.dumps(self.acts))]
+        return RenderResult(html=rendered_html(url), final_url=url, json_responses=jr, requests=json_calls(jr))
 
 
 @pytest.fixture
@@ -77,20 +79,24 @@ def test_shell_detection():
     assert not is_js_shell("BEGIN:VCALENDAR", "")
 
 
-def test_api_mapping_learned_without_llm():
-    rules = jx.learn_api_rules(EVENT_SPEC, [("https://acts.org/api/changemakers", json.dumps(ORGS)),
-                                            ("https://acts.org/api/activities", json.dumps(ACTS))],
-                               "https://acts.org/", [f"/activities?scrollTo={a['id']}&activity_id={a['id']}" for a in ACTS])
-    assert rules["api_url"].endswith("/api/activities") and rules["learned_by"] == "heuristic"
-    m = rules["mapping"]
+def _learn(fetcher=None, acts=None, hrefs=None):
+    from scraper0.core import plan_learn
+    jr = [("https://acts.org/api/changemakers", json.dumps(ORGS)), ("https://acts.org/api/activities", json.dumps(acts or ACTS))]
+    hrefs = hrefs if hrefs is not None else [f"https://acts.org/activities?scrollTo={a['id']}&activity_id={a['id']}" for a in ACTS]
+    return plan_learn.learn_plan(EVENT_SPEC, json_calls(jr), "https://acts.org/", fetcher or JSFetcher(), hrefs, [])
+
+
+def test_api_plan_learned_without_llm():
+    plan, items, _ = _learn()
+    assert plan["learned_by"] == "heuristic" and plan["steps"][0]["url"] == "https://acts.org/api/activities"
+    m = plan["mapping"]
     assert m["start_time"] == ["date", "start_time"]                       # date + time live in separate keys
     assert m["address"] == "location.address" and m["latitude"] == "location.latitude"
     assert m["image"] == "media_urls.0"                                    # image_url is always null here
     assert "placeholder" not in json.dumps(m)                              # "place" must not match "placeholder"
-    assert rules["link_template"] == "/activities?scrollTo={id}&activity_id={id}"
-    assert rules["lookups"]["organisation"]["key"] == "changemaker_id"
-    items = jx.items_from_rules(EVENT_SPEC, rules, json.dumps(ACTS), "https://acts.org/",
-                                {"https://acts.org/api/changemakers": json.dumps(ORGS)})
+    assert plan["link_template"] == "https://acts.org/activities?scrollTo={id}&activity_id={id}"
+    lookup = next(st for st in plan["steps"] if st["type"] == "lookup")
+    assert lookup["key"] == "changemaker_id" and lookup["field"] == "organisation"
     assert len(items) == 3                                                 # the undated one is not an event
     a = items[1]
     assert a["name"] == "Cubbon Tree Walk" and a["start_time"] == "2026-12-06T11:15:00.000Z"    # 16:45 IST
@@ -108,11 +114,17 @@ def test_detail_page_link_beats_scroll_to_link():
 
 def test_time_only_value_is_never_a_date():
     """'16:45' alone would parse as today 16:45 — a start_time key holding only times must not be used alone."""
+    import pytest as _pytest
+
+    from scraper0.core import plan_learn
     acts = [dict(a, date=None) for a in ACTS[:3]]
-    assert jx.learn_api_rules(EVENT_SPEC, [("https://acts.org/api/a", json.dumps(acts))], "https://acts.org/") is None
+    with _pytest.raises(plan_learn.LearnFailed):
+        plan_learn.learn_plan(EVENT_SPEC, json_calls([("https://acts.org/api/a", json.dumps(acts))]),
+                              "https://acts.org/", JSFetcher(), [], [])
 
 
-def test_crawl_renders_once_then_uses_api_directly(store):
+def test_crawl_learns_a_plan_then_runs_it_without_browser_or_ai(store):
+    from scraper0.core import plans
     f = JSFetcher()
     items, stats = Crawler(store, f, no_llm).crawl("https://acts.org/", EVENT_SPEC, CrawlOptions(workers=1))
     assert len(items) == 3 and stats.rendered == 1 and stats.by_method == {"api": 1} and stats.recipes_learned == 1
@@ -120,23 +132,21 @@ def test_crawl_renders_once_then_uses_api_directly(store):
     assert f.renders == ["https://acts.org/", "https://acts.org/activities"]
     assert items[0]["link"] == "https://acts.org/activities/ulsoor-lake-cleanup-1"
     assert all(i["_meta"]["extraction"] == "api" for i in items)
-    [r] = store.list_recipes("acts.org")
-    assert r["strategy"] == "json_api" and r["path_pattern"] == "api:/"
+    assert stats.plan["link_template"] == "https://acts.org/activities/{slug}"
 
     f2 = JSFetcher()
-    items2, stats2 = Crawler(store, f2, no_llm).crawl("https://acts.org/", EVENT_SPEC, CrawlOptions(workers=1))
-    assert f2.renders == [] and stats2.rendered == 0 and stats2.by_method == {"api_recipe": 1}   # no browser
+    items2, run = plans.run_plan(stats.plan, f2, EVENT_SPEC, "https://acts.org/")
+    assert f2.renders == [] and run.ai_calls == 0                           # no browser, no AI
     assert f2.gets == ["https://acts.org/api/activities", "https://acts.org/api/changemakers"]    # not even the page
     assert [i["name"] for i in items2] == [i["name"] for i in items]
     assert items2[0]["organisation"] == "Lake Friends"
 
 
-def test_api_gone_falls_back_to_render_and_relearns(store):
-    Crawler(store, JSFetcher(), no_llm).crawl("https://acts.org/", EVENT_SPEC, CrawlOptions(workers=1))
-    f = JSFetcher(api_up=False)                                             # endpoint now 404s for direct calls
-    items, stats = Crawler(store, f, no_llm).crawl("https://acts.org/", EVENT_SPEC, CrawlOptions(workers=1))
-    assert len(items) == 3 and stats.rendered == 1                          # still got the data, via the browser
-    assert store.list_recipes("acts.org")[0]["failures"] == 1
+def test_api_gone_fails_the_run_so_repair_can_relearn(store):
+    from scraper0.core import plans
+    _, stats = Crawler(store, JSFetcher(), no_llm).crawl("https://acts.org/", EVENT_SPEC, CrawlOptions(workers=1))
+    with pytest.raises(plans.PlanError, match="HTTP 404"):
+        plans.run_plan(stats.plan, JSFetcher(api_up=False), EVENT_SPEC, "https://acts.org/")
 
 
 def test_no_browser_available_degrades_to_static(store):
@@ -153,10 +163,16 @@ def test_llm_maps_unusual_keys_for_custom_entity(store):
             {"rolle": "Designer", "arbeitgeber": "Globex", "verguetung": "90000", "ref": "j-1002"}]
 
     class F(JSFetcher):
+        def get(self, url):
+            if url == "https://acts.org/api/stellen":
+                return json.dumps({"data": {"rows": rows}}), "application/json"
+            return super().get(url)
+
         def render(self, url):
             self.renders.append(url)
+            jr = [("https://acts.org/api/stellen", json.dumps({"data": {"rows": rows}}))]
             return RenderResult(html="<html><body><a href='/jobs/j-1001'>a</a><a href='/jobs/j-1002'>b</a></body></html>",
-                                final_url=url, json_responses=[("https://acts.org/api/stellen", json.dumps({"data": {"rows": rows}}))])
+                                final_url=url, json_responses=jr, requests=json_calls(jr))
     calls = []
 
     def llm(prompt):
@@ -165,11 +181,10 @@ def test_llm_maps_unusual_keys_for_custom_entity(store):
         return json.dumps({"is_entity_list": True, "mapping": {"title": "rolle", "company": "arbeitgeber",
                                                                "salary": "verguetung", "bogus": "nope"}})
     items, stats = Crawler(store, F(), llm).crawl("https://acts.org/", job, CrawlOptions(workers=1))
-    assert len(calls) == 1 and stats.llm_calls == 1
+    assert len(calls) == 1 and stats.llm_calls == 1 and stats.plan["learned_by"] == "llm"
     assert {(i["title"], i["company"], i["salary"]) for i in items} == {("Data Engineer", "Acme", 120000.0), ("Designer", "Globex", 90000.0)}
     assert items[0]["link"] == "https://acts.org/jobs/j-1001"
-    r = store.list_recipes("acts.org")[0]
-    assert r["rules"]["items_path"] == "data.rows" and r["rules"]["learned_by"] == "llm" and r["entity"] == "t1:job"
+    assert stats.plan["steps"][0]["items"] == {"json": "data.rows"} and stats.plan["entity"] == "job"
 
 
 def test_event_engine_on_js_site_filters_online_and_past(store):

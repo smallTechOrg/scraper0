@@ -47,13 +47,6 @@ class Settings(BaseSettings):
     bootstrap_admin_password: SecretStr | None = None
     bootstrap_groq_api_key: SecretStr | None = None
     bootstrap_groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
-    bootstrap_legacy_tenant: str = "hashtaglocal"
-
-    # --- legacy /api/v1/scrape: keyless calls map to this tenant while hashtaglocal-backend migrates
-    legacy_keyless: bool = False
-    legacy_tenant_slug: str = "hashtaglocal"
-    # X-Backend-Url allowlist for FETCH_EVENTS dedupe callbacks (SSRF guard), comma-separated
-    allowed_backend_urls: str = ""
 
     # --- jobs: thread (local worker), inline (run inside the submitting request), cloud_tasks (Cloud Run)
     job_mode: JobMode = "thread"
@@ -73,16 +66,12 @@ class Settings(BaseSettings):
     captcha_solver: Literal["llm", "easyocr", "auto"] = "llm"   # auto = easyocr when installed, else llm
     browser_headless: bool = True
 
-    # --- uploads
+    # --- BBMP complaint attachments (downloaded from media_url)
     max_upload_mb: int = 40
 
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
-
-    @property
-    def backend_url_allowlist(self) -> set[str]:
-        return {u.strip().rstrip("/") for u in self.allowed_backend_urls.split(",") if u.strip()}
 
 
 @lru_cache
