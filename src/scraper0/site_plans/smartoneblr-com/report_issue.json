@@ -1,0 +1,470 @@
+{
+  "plan_version": 1,
+  "kind": "action",
+  "mode": "write",
+  "name": "BBMP Sahaya 2.0: report a complaint",
+  "inputs": {
+    "category": {
+      "type": "string",
+      "required": true,
+      "description": "exactly as the portal's Category list shows it"
+    },
+    "sub_category": {
+      "type": "string",
+      "required": true
+    },
+    "description": {
+      "type": "string",
+      "default": ""
+    },
+    "media_url": {
+      "type": "string",
+      "format": "url",
+      "description": "a photo (jpg/png) to attach",
+      "example": "https://example.org/photo.jpg"
+    },
+    "latitude": {
+      "type": "string",
+      "coerce": true,
+      "required": true,
+      "example": 12.97
+    },
+    "longitude": {
+      "type": "string",
+      "coerce": true,
+      "required": true,
+      "example": 77.59
+    }
+  },
+  "auth": {
+    "required": true,
+    "fields": [
+      "username",
+      "password"
+    ]
+  },
+  "block": [
+    "**polyfill.io**"
+  ],
+  "steps": [
+    {
+      "id": "open",
+      "type": "browser",
+      "do": "goto",
+      "url": "https://www.smartoneblr.com/BBMPServices.htm",
+      "settle_ms": 2000,
+      "note": "Opening SmartOne BLR"
+    },
+    {
+      "id": "session",
+      "type": "session",
+      "key": "{auth.username}",
+      "settle_ms": 2000,
+      "logged_in": {
+        "visible": {
+          "text": "Welcome"
+        },
+        "unless": {
+          "visible": {
+            "text": "Login/Register"
+          }
+        },
+        "timeout_ms": 60000
+      },
+      "message": "Session still invalid after re-login",
+      "login": [
+        {
+          "type": "browser",
+          "do": "click",
+          "target": {
+            "text": "Login/Register"
+          }
+        },
+        {
+          "type": "browser",
+          "do": "fill",
+          "target": {
+            "css": "#username",
+            "in": [
+              {
+                "css": ".modal-dialog.modal-sm",
+                "has": "#username"
+              }
+            ]
+          },
+          "value": "{auth.username}"
+        },
+        {
+          "type": "browser",
+          "do": "fill",
+          "target": {
+            "css": "#password",
+            "in": [
+              {
+                "css": ".modal-dialog.modal-sm",
+                "has": "#username"
+              }
+            ]
+          },
+          "value": "{auth.password}",
+          "settle_ms": 500
+        },
+        {
+          "type": "captcha",
+          "uses_ai": true,
+          "attempts": 3,
+          "message": "Captcha solving failed after retries",
+          "image": {
+            "any": [
+              {
+                "css": "img"
+              },
+              {
+                "css": "body"
+              }
+            ],
+            "in": [
+              {
+                "css": ".modal-dialog.modal-sm",
+                "has": "#username"
+              },
+              {
+                "frame": "#image"
+              }
+            ]
+          },
+          "into": {
+            "any": [
+              {
+                "css": "input[placeholder*='captcha' i]"
+              },
+              {
+                "css": "input[name='WordVerification']"
+              },
+              {
+                "css": "#MXX"
+              },
+              {
+                "css": "input[name='captcha']"
+              },
+              {
+                "css": "input[id*='captcha']"
+              },
+              {
+                "css": "input[placeholder*='verification' i]"
+              },
+              {
+                "css": "input:not([name*='username']):not([name*='password']):visible"
+              }
+            ],
+            "in": [
+              {
+                "css": ".modal-dialog.modal-sm",
+                "has": "#username"
+              },
+              {
+                "css": ".modal-body"
+              }
+            ]
+          },
+          "refresh": {
+            "css": "i.fa-refresh",
+            "in": [
+              {
+                "css": ".modal-dialog.modal-sm",
+                "has": "#username"
+              }
+            ]
+          },
+          "submit": [
+            {
+              "type": "browser",
+              "do": "click",
+              "target": {
+                "any": [
+                  {
+                    "css": "button:has-text('Sign In')"
+                  },
+                  {
+                    "role": "button",
+                    "name": "Sign In"
+                  }
+                ],
+                "in": [
+                  {
+                    "css": ".modal-dialog.modal-sm",
+                    "has": "#username"
+                  },
+                  {
+                    "css": ".modal-body"
+                  }
+                ]
+              },
+              "settle_ms": 200
+            }
+          ],
+          "watch": {
+            "url": "**/dwr/call/plaincall/HomePagelogin.LoginVaildation.dwr",
+            "timeout_ms": 15000,
+            "fail_unless_contains": "loginid:",
+            "fail_message": "Invalid mobile number or password"
+          },
+          "success": {
+            "any": [
+              {
+                "visible": {
+                  "text": "Welcome"
+                },
+                "timeout_ms": 15000
+              },
+              {
+                "hidden": {
+                  "css": ".modal-dialog.modal-sm:has(#username)"
+                },
+                "timeout_ms": 5000
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "sahaya",
+      "type": "browser",
+      "do": "click",
+      "target": {
+        "text": "BBMP (SAHAYA 2.0)"
+      },
+      "no_wait_after": true,
+      "wait_load": "networkidle",
+      "settle_ms": 3000,
+      "note": "Logged in; filling complaint form"
+    },
+    {
+      "id": "category",
+      "type": "browser",
+      "do": "select",
+      "in": [
+        {
+          "frame_url": "WssBBMPComplaintRequest"
+        }
+      ],
+      "target": {
+        "css": "select#typeId"
+      },
+      "label": "{input.category}",
+      "ignore_case": false,
+      "settle_ms": 1500
+    },
+    {
+      "id": "sub_category",
+      "type": "browser",
+      "do": "select",
+      "in": [
+        {
+          "frame_url": "WssBBMPComplaintRequest"
+        }
+      ],
+      "timeout_ms": 30000,
+      "target": [
+        {
+          "css": "select#subTypeId"
+        },
+        {
+          "css": "select#subCategoryId"
+        },
+        {
+          "css": "select[name*='sub']"
+        },
+        {
+          "css": "select",
+          "nth": 1
+        }
+      ],
+      "label": "{input.sub_category}",
+      "dispatch": [
+        "change"
+      ],
+      "settle_ms": 1000
+    },
+    {
+      "id": "description",
+      "type": "browser",
+      "do": "fill",
+      "in": [
+        {
+          "frame_url": "WssBBMPComplaintRequest"
+        }
+      ],
+      "state": "attached",
+      "target": [
+        {
+          "css": "textarea#description"
+        },
+        {
+          "css": "textarea[name*='description']"
+        },
+        {
+          "css": "textarea"
+        },
+        {
+          "css": "input[name*='description']"
+        },
+        {
+          "css": "input[type='text']"
+        }
+      ],
+      "value": "{input.description}"
+    },
+    {
+      "id": "photo",
+      "type": "browser",
+      "do": "upload",
+      "in": [
+        {
+          "frame_url": "WssBBMPComplaintRequest"
+        }
+      ],
+      "when": {
+        "input": "media_url"
+      },
+      "target": [
+        {
+          "css": "input#docOthFileName0"
+        },
+        {
+          "css": "input[name^='docOthFileName']"
+        },
+        {
+          "css": "input.file-input"
+        }
+      ],
+      "file": {
+        "url": "{input.media_url}",
+        "exts": [
+          ".jpg",
+          ".jpeg",
+          ".png"
+        ]
+      },
+      "dispatch": [
+        "change",
+        "input"
+      ],
+      "dispatch_times": 2,
+      "dispatch_gap_ms": 2000,
+      "note": "Attaching the photo"
+    },
+    {
+      "id": "use_location",
+      "type": "browser",
+      "do": "check",
+      "in": [
+        {
+          "frame_url": "WssBBMPComplaintRequest"
+        }
+      ],
+      "target": {
+        "css": "input[type='checkbox']"
+      }
+    },
+    {
+      "id": "address",
+      "type": "browser",
+      "do": "fill",
+      "in": [
+        {
+          "frame_url": "WssBBMPComplaintRequest"
+        }
+      ],
+      "target": [
+        {
+          "css": "input#pac-inputnew"
+        },
+        {
+          "css": "input#pac-input"
+        },
+        {
+          "css": "input[placeholder='Address Search']"
+        }
+      ],
+      "value": "{input.latitude}, {input.longitude}"
+    },
+    {
+      "id": "address_enter",
+      "type": "browser",
+      "do": "press",
+      "key": "Enter",
+      "settle_ms": 2000
+    },
+    {
+      "id": "submit",
+      "type": "browser",
+      "do": "click",
+      "in": [
+        {
+          "frame_url": "WssBBMPComplaintRequest"
+        }
+      ],
+      "commit": true,
+      "note": "Submitting complaint",
+      "target": [
+        {
+          "css": "button:has-text('Submit')"
+        },
+        {
+          "role": "button",
+          "name": "Submit"
+        }
+      ]
+    },
+    {
+      "id": "confirm",
+      "type": "browser",
+      "do": "click",
+      "target": {
+        "css": "#popup_ok"
+      }
+    },
+    {
+      "id": "acknowledged",
+      "type": "browser",
+      "do": "wait_for",
+      "target": {
+        "css": "h5.mainHeading:has-text('Complaint Registration Acknowledgement')"
+      }
+    },
+    {
+      "id": "ack",
+      "type": "extract",
+      "target": {
+        "css": "p.text-left"
+      },
+      "fields": {
+        "complaint_id": {
+          "regex": "Complaint ID\\s*(\\d+)",
+          "required": true,
+          "message": "Could not extract Complaint ID"
+        },
+        "timestamp": {
+          "regex": "on\\s*(\\d{2}/\\d{2}/\\d{4}\\s+\\d{2}:\\d{2})",
+          "required": true,
+          "message": "Could not extract timestamp"
+        }
+      }
+    }
+  ],
+  "output": {
+    "tracking_id": {
+      "from": "vars.ack.complaint_id",
+      "type": "int",
+      "required": true
+    }
+  },
+  "verify": {
+    "action": "track_issue",
+    "input": {
+      "tracking_id": "{output.tracking_id}"
+    }
+  }
+}

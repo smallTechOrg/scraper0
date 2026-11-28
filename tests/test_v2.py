@@ -157,7 +157,9 @@ def test_create_site_reuses_existing_and_seeded_actions(app, tenants):
     assert {"teameverest-ngo", "mybharat-gov-in", "ivolunteer-in", "smartoneblr-com", "karmana-in"} <= set(sites)
     assert sites["smartoneblr-com"]["actions"] == [
         {"name": "report_issue", "kind": "write", "mode": "write", "status": "locked"},
-        {"name": "track_issue", "kind": "read", "mode": "lookup", "status": "locked"}]
+        {"name": "report_issue_plan", "kind": "write", "mode": "write", "status": "draft"},   # the same actions as data
+        {"name": "track_issue", "kind": "read", "mode": "lookup", "status": "locked"},
+        {"name": "track_issue_plan", "kind": "read", "mode": "lookup", "status": "draft"}]
     assert [s["site_id"] for s in acme.get("/v2/sites?q=bharat").json()["data"]] == ["mybharat-gov-in"]
     a = acme.get("/v2/sites/teameverest-ngo/actions/fetch_events").json()["data"]
     assert a["implementation"] == "code" and a["locked_version"] == 1 and a["status"] == "locked"

@@ -214,6 +214,8 @@ def run(job_id: str, tenant_id: str, kind: str, inp: dict, rep, ai) -> dict:
         return learn(job_id, tenant_id, inp, rep, ai)
     if kind == "site_refresh":
         return refresh(job_id, tenant_id, inp, rep, ai)
+    if kind == "site_lookup":
+        return lookup(job_id, tenant_id, inp, rep, ai)
     return write(job_id, tenant_id, inp, rep, ai)
 
 
@@ -339,6 +341,70 @@ def _store(site_id, name, version, job_id, payload) -> dict:
     return counts
 
 
+# ------------------------------------------------------------------ action plans (lookups and writes as data)
+
+def _action_renderer():
+    """The browser action plans run in (tests swap this for one that may reach their local fake site)."""
+    from scraper0.core.render import shared_renderer
+    return shared_renderer()
+
+
+def _version_snapshot(site_id: str, name: str, version: int | None) -> dict:
+    with session_scope() as s:
+        a = sites_svc.get_action(s, site_id, name)
+        v = s.scalar(select(ActionVersion).where(ActionVersion.action_id == a.id,
+                                                 ActionVersion.version == (version or a.locked_version)))
+        if v is None:
+            raise ScrapeFailed(f"action {name!r} has no version {version}")
+        return dict(v.implementation_snapshot or {})
+
+
+def run_action(site_id: str, plan: dict, tenant_id: str, data: dict, auth: dict | None, rep, ai, on_commit=None,
+               timeout_s: float = 420) -> tuple[dict, dict]:
+    """Run one action plan as this tenant → (output, run stats). The tenant's session for the site is reused and
+    saved through the encrypted per-tenant state store. Raises action_plans.ActionError."""
+    from scraper0.core import action_plans
+    from scraper0.services.connector_state import DBStateStore
+    state = DBStateStore(tenant_id, f"site:{site_id}"[:64])
+    return action_plans.run_action_plan(plan, _action_renderer(), data, auth, ai=ai, state=state, progress=rep,
+                                        on_commit=on_commit, timeout_s=timeout_s)
+
+
+def lookup(job_id: str, tenant_id: str, inp: dict, rep, ai) -> dict:
+    """A plan lookup (e.g. complaint status): input → output."""
+    from scraper0.core.plans import PlanError
+    from scraper0.jobs.execute import JobFailed
+    from scraper0.jobs.runner import decrypt_auth
+    snapshot = _version_snapshot(inp["site_id"], inp["action"], inp.get("version"))
+    try:
+        out, stats = run_action(inp["site_id"], snapshot["plan"], tenant_id, inp.get("data") or {}, decrypt_auth(inp),
+                                rep, ai, timeout_s=150)
+    except PlanError as e:
+        raise JobFailed(str(e)[:500]) from e
+    return {"data": out, "plan_run": stats}
+
+
+def verify_write(site_id: str, spec: dict, output: dict, tenant_id: str, rep, ai) -> dict:
+    """After a write succeeded: confirm it with another action of the same site (a lookup of what was just
+    created). → {"verified": bool, "action", "output" | "error"}; never raises — the write already happened."""
+    from scraper0.core.plans import render
+    try:
+        data = render(spec.get("input") or {}, {"output": output})
+        with session_scope() as s:
+            a, v = sites_svc.get_locked(s, site_id, spec["action"])
+            if a.mode != "lookup":
+                raise ScrapeFailed(f"{spec['action']} is not a lookup action")
+            impl, conn, conn_action = a.implementation, a.connector, a.connector_action
+            snapshot = dict(v.implementation_snapshot or {})
+        if impl == "plan":
+            got, _ = run_action(site_id, snapshot["plan"], tenant_id, data, None, rep, ai, timeout_s=150)
+        else:
+            got = run_code(conn, conn_action, tenant_id, rep, ai, data=data)
+        return {"verified": True, "action": spec["action"], "output": got}
+    except Exception as e:  # noqa: BLE001
+        return {"verified": False, "action": spec["action"], "error": str(e)[:300] or type(e).__name__}
+
+
 # ------------------------------------------------------------------ writes
 
 def finalize_write(record_id: int, job_id: str, status: str, output=None, error: str | None = None) -> None:
@@ -361,12 +427,36 @@ def write(job_id: str, tenant_id: str, inp: dict, rep, ai) -> dict:
                           .values(submit_started=True, updated_at=now()))
         rep(message, data, **kw)
 
+    def on_commit():
+        """A plan's commit step is about to run: persist it first, so a crash from here on is outcome_unknown."""
+        started["v"] = True
+        with session_scope() as s:
+            s.execute(update(WriteRecord).where(WriteRecord.id == record_id, WriteRecord.job_id == job_id)
+                      .values(submit_started=True, updated_at=now()))
+
+    stats = verify = None
     try:
-        out = run_code(inp["connector"], inp["connector_action"], tenant_id, progress, ai, data=inp.get("data") or {},
-                       auth=decrypt_auth(inp))
+        if inp.get("connector"):
+            out = run_code(inp["connector"], inp["connector_action"], tenant_id, progress, ai,
+                           data=inp.get("data") or {}, auth=decrypt_auth(inp))
+        else:
+            snapshot = _version_snapshot(inp["site_id"], inp["site_action"], inp.get("version"))
+            out, stats = run_action(inp["site_id"], snapshot["plan"], tenant_id, inp.get("data") or {},
+                                    decrypt_auth(inp), rep, ai, on_commit=on_commit)
+            verify = snapshot["plan"].get("verify")
     except Exception as e:
         msg = str(e)[:500] or type(e).__name__
-        finalize_write(record_id, job_id, "outcome_unknown" if started["v"] else "failed", error=msg)
+        committed = started["v"] or bool(getattr(e, "committed", False))
+        finalize_write(record_id, job_id, "outcome_unknown" if committed else "failed", error=msg)
+        if getattr(e, "stats", None):
+            log.info("write_plan_failed", site_id=inp.get("site_id"), action=inp.get("site_action"), run=e.stats)
         raise JobFailed(msg) from e
-    finalize_write(record_id, job_id, "succeeded", output=out)
-    return {"data": out, "write": {"status": "succeeded", "submit_started": started["v"]}}
+    finalize_write(record_id, job_id, "succeeded", output=out)        # recorded before verifying: it happened
+    result = {"data": out, "write": {"status": "succeeded", "submit_started": started["v"]}}
+    if stats is not None:
+        result["plan_run"] = stats
+    if verify:
+        rep("Verifying", {"action": verify["action"]})
+        result["write"]["verify"] = verify_write(inp["site_id"], verify, out, tenant_id, rep, ai)
+        result["write"]["verified"] = result["write"]["verify"]["verified"]
+    return result

@@ -44,9 +44,10 @@ PLAN_VERSION = 1
 # and a plan with no such step runs at zero tokens. Calls and tokens are counted per step (RunStats.ai).
 AI_STEP_TYPES = {"ai", "captcha"}
 STEP_TYPES = {"request", "for_each", "lookup", "any_of"} | AI_STEP_TYPES
-# Reserved for the next phases (browser automation, logins, writes). Recognised so the error says "not yet",
-# not "unknown".
-RESERVED_STEP_TYPES = {"browser", "session", "extract", "commit", "verify", "code"}
+# Browser automation, logins and writes are action plans ("kind": "action", core/action_plans.py), not list
+# plans. Recognised here so the error points there instead of saying "unknown".
+ACTION_STEP_TYPES = {"browser", "session", "extract", "expect"}
+RESERVED_STEP_TYPES = {"code"}
 # Failure handling, valid on any step: retry (transient failures only), expect (post-checks), on_failure
 # (fail | skip | {"goto": step}), when (declarative condition), fallback_only (runs only when jumped to).
 MAX_RETRY_ATTEMPTS = 5
@@ -85,6 +86,9 @@ class PlanError(Exception):
 def validate(plan: dict) -> dict:
     if not isinstance(plan, dict):
         raise PlanError("a plan is a JSON object")
+    if plan.get("kind") == "action":
+        from scraper0.core import action_plans
+        return action_plans.validate(plan)
     if plan.get("plan_version") != PLAN_VERSION:
         raise PlanError(f"unsupported plan_version {plan.get('plan_version')!r} (this runner knows {PLAN_VERSION})")
     steps = plan.get("steps")
@@ -117,6 +121,8 @@ def _validate_step(st, i, ids: list[str], gotos: list, alt_of: str | None = None
         raise PlanError(f"step {i} is not an object")
     t = st.get("type")
     sid = st.get("id") or (f"{alt_of}.{i}" if alt_of else None)
+    if t in ACTION_STEP_TYPES:
+        raise PlanError(f"step {sid or i}: {t!r} steps belong in an action plan (\"kind\": \"action\"), not a list plan")
     if t in RESERVED_STEP_TYPES:
         raise PlanError(f"step {sid or i}: step type {t!r} is reserved for a later version and not supported yet")
     if t not in STEP_TYPES:
@@ -746,7 +752,7 @@ class Runner:
         elif t == "ai":
             self._ai_step(st, ctx, results[st["over"]], plan, self._spec, self._seed)
         elif t == "captcha":
-            raise PlanError("captcha steps need a browser step, which this runner doesn't support yet")
+            raise PlanError("captcha steps run in action plans (\"kind\": \"action\"), next to the browser steps they need")
         self._check(st, out)
         return out if t in ("request",) else None
 

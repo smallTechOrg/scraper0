@@ -53,6 +53,8 @@ def seed() -> None:
             log.info("bootstrap_groq_provider_created")
     from scraper0.services.sites import seed_code_actions
     seed_code_actions()          # v2: connector actions as locked version 1
+    from scraper0.services.sites import seed_plan_actions
+    seed_plan_actions()          # shipped action plans as draft actions (an admin locks them)
 
 
 def startup() -> None:

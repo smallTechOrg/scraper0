@@ -14,8 +14,8 @@ fetched).
   before the AI.
 - **Every call is accounted.** Run stats report `ai_calls`, `ai_tokens` and `ai_by_step`, and the job result
   carries them. Calls go through the tenant's AI budget like any other AI use.
-- **No browser at run time.** This version has no browser steps, so a locked plan never opens one. Browser steps
-  come later.
+- **No browser for list plans.** A locked list plan never opens a browser. Lookups and writes that need one (a
+  login, a form) are **action plans**, described at the end of this page.
 
 ## Shape
 
@@ -56,10 +56,10 @@ fetched).
 | `lookup` | Fetches a second list and joins it in (`key` on the item → `id_key` on the other list → `value` into `field`). If it fails, only that field stays empty. |
 | `any_of` | Ordered `alternatives` (any step type). The first that succeeds wins, and the run records which one. |
 | `ai` | **Uses AI.** For records of `over` that are missing `fields`, reads the page with the AI and fills only those fields. |
-| `captcha` | **Uses AI.** Non-AI solver first, then the AI. It needs browser steps, so it isn't executable yet. |
+| `captcha` | **Uses AI.** Non-AI solver first, then the AI. It runs in action plans, next to the browser steps it needs. |
 
-Reserved for later versions (rejected as "not supported yet"): `browser`, `session`, `extract`, `commit`, `verify`,
-`code`.
+`browser`, `session`, `extract` and `expect` steps belong in action plans; a list plan that contains one is rejected
+with a message saying so. `code` stays reserved.
 
 ### On any step
 
@@ -234,3 +234,140 @@ A code action's `implementation` is `{"implementation": "code", "connector": "TE
   there. Point it at a checkout of a git repository and commit from a cron job or CI; scraper0 does not push.
   A failed export is logged and never fails the lock. `--prune` on the command removes files of actions that are
   no longer locked.
+
+## Action plans (lookups and writes)
+
+An **action plan** does one thing on a site for a caller — look up a record, or submit a form — by driving a browser
+the way a person would. It is stored in the action's version (`implementation_snapshot.plan`) and run by one generic
+runner, so "track complaint" and "report complaint" are onboarded as data, not written as a connector. Code:
+`src/scraper0/core/action_plans.py`. Shipped plans live in `src/scraper0/site_plans/<site_id>/<action>.json`.
+
+```json
+{
+  "plan_version": 1, "kind": "action", "mode": "write",
+  "inputs": {"category": {"type": "string", "required": true},
+             "media_url": {"type": "string", "format": "url"},
+             "latitude": {"type": "string", "coerce": true, "required": true}},
+  "auth": {"required": true, "fields": ["username", "password"]},
+  "block": ["**polyfill.io**"],
+  "steps": [
+    {"id": "open", "type": "browser", "do": "goto", "url": "https://site/home"},
+    {"id": "session", "type": "session", "key": "{auth.username}",
+     "logged_in": {"visible": {"text": "Welcome"}, "unless": {"visible": {"text": "Login/Register"}}},
+     "login": [
+       {"type": "browser", "do": "click", "target": {"text": "Login/Register"}},
+       {"type": "browser", "do": "fill", "target": {"css": "#username"}, "value": "{auth.username}"},
+       {"type": "browser", "do": "fill", "target": {"css": "#password"}, "value": "{auth.password}"},
+       {"type": "captcha", "uses_ai": true, "attempts": 3,
+        "image": {"css": "img.captcha"}, "into": [{"placeholder": "captcha"}, {"css": "input[name='captcha']"}],
+        "refresh": {"css": "i.fa-refresh"},
+        "submit": [{"type": "browser", "do": "click", "target": {"role": "button", "name": "Sign In"}}],
+        "watch": {"url": "**/login.dwr", "fail_unless_contains": "loginid:", "fail_message": "Invalid password"},
+        "success": {"visible": {"text": "Welcome"}}}]},
+    {"id": "category", "type": "browser", "do": "select", "in": [{"frame_url": "ComplaintRequest"}],
+     "target": {"css": "select#typeId"}, "label": "{input.category}"},
+    {"id": "photo", "type": "browser", "do": "upload", "when": {"input": "media_url"},
+     "target": {"css": "input[type=file]"}, "file": {"url": "{input.media_url}"}},
+    {"id": "submit", "type": "browser", "do": "click", "commit": true,
+     "target": [{"css": "button:has-text('Submit')"}, {"role": "button", "name": "Submit"}]},
+    {"id": "ack", "type": "extract", "target": {"css": "p.ack"},
+     "fields": {"complaint_id": {"regex": "Complaint ID\\s*(\\d+)", "required": true}}}
+  ],
+  "output": {"tracking_id": {"from": "vars.ack.complaint_id", "type": "int", "required": true}},
+  "verify": {"action": "track_issue", "input": {"tracking_id": "{output.tracking_id}"}}
+}
+```
+
+### Top level
+
+| Key | Meaning |
+|---|---|
+| `mode` | `lookup` (a read: input → output) or `write`. |
+| `inputs` | What the caller sends as `input`: per field `type` (`string`, `number`, `integer`, `boolean`), `required`, `default`, `pattern` (full match), `enum`, `format: "url"`, `coerce` (numbers accepted for a string). The input is checked **before anything touches the site**; a bad one is 422 `invalid_input`. The action's `input_schema` and the contract's curl are derived from this. |
+| `auth` | The credential fields the caller sends as `auth`, and whether they are required. |
+| `block` | URL globs the browser never loads. |
+| `output` | Each output field: `from` (a path such as `vars.ack.complaint_id`), `first_of` (several paths), `template`, `value`, or `object` (nested). Options: `type` (`str`, `int`, `float`, `bool`), `required` + `message`, `map` (site wording → your values, case-insensitive) + `unknown_message`, `omit_if_missing`. |
+| `verify` | After a write succeeded, run another action of the same site (a locked lookup) to confirm it. |
+
+### Step types
+
+| Type | What it does |
+|---|---|
+| `browser` | One browser action, `do`: `goto` (`url`), `click`, `fill` (`value`), `select` (`label` or `value`; waits for the option to appear, so lists that fill in asynchronously work), `upload` (`file.url` is downloaded through the SSRF guard with the upload size cap, then attached), `check`, `press` (`key`, with or without a target), `wait_for` (a target, `state: hidden`, or `load_state`), `wait` (`ms`). |
+| `session` | Reuse or log in. The tenant's stored browser session for `key` is loaded before the page opens. If `logged_in` is false, the `login` steps run, `logged_in` is checked again, and the session is saved. Sessions are stored encrypted, per tenant and site (`connector_state`), under a hash of the key. |
+| `captcha` | **Uses AI** (must declare `"uses_ai": true`). Screenshot `image` → solver (EasyOCR when configured, then the AI) → fill `into` → run `submit` → check `success`. An unreadable or rejected captcha clicks `refresh` and tries again, up to `attempts` (at most 5). `watch` reads the response to the login call: no call means the site rejected the captcha client-side (retry); a body without `fail_unless_contains` means the captcha was right and the credentials were refused (fail with `fail_message`, no retry). |
+| `extract` | Reads values into `vars.<id>`: `fields` by `regex` (over the text, or `from: "html"`), `css` (+ `attr`), `json` path, or `text`; or `labels`, a details panel read as label → value. `required` + `message` fail the step in the plan's own words. |
+| `expect` | A condition that must hold, with a `message` for when it does not. |
+| `any_of` | Ordered `alternatives`, each one step or a list of steps: click the button, else press Enter. The run records which one worked. |
+
+### On any step
+
+| Key | Meaning |
+|---|---|
+| `target` | Where to act: one locator, or **ordered alternatives** — `label`, `role` + `name`, `text`, `placeholder`, `css`, `test_id` (optional `nth`, `exact`). The first that matches wins, and the run records the index when it was not the first. |
+| `in` | Where the target lives: a list of `{"frame_url": "…"}` (an iframe by its URL), `{"frame": "css"}`, `{"css": "…", "has": "…"}` (a container, such as the login modal), applied in order. It can sit on the step or on one target (`{"any": [...], "in": [...]}`). |
+| `when` | Run the step only if a condition holds, e.g. `{"input": "media_url"}`. |
+| `optional` | A failure skips the step instead of failing the run. |
+| `retry` | `{attempts ≤ 3, backoff_s}`. Never allowed on the commit step. |
+| `message` | The error text if this step fails. |
+| `note` | A progress message shown while the step runs. |
+| `timeout_ms`, `settle_ms`, `wait_load` | How long to wait for the target (default 60 s, at most 120 s); a pause after the step; a load state to wait for after it. |
+| `commit` | The point of no return (below). |
+
+Conditions (`when`, `expect`, `logged_in`, `success`): `visible` / `hidden` (a target, with `timeout_ms`, and `unless`
+— a second condition that answers "no" early, such as the login link showing), `url_contains`, `text_contains`,
+`input`, `var`, and `not` / `any` / `all`.
+
+Templates are the same plain substitution as list plans. The context holds `input`, `auth`, `vars` (what `extract`
+steps read), `output` (in `verify`) and `today`.
+
+### Writes: the commit step
+
+- A write plan has **exactly one** top-level step with `"commit": true`: the click that submits. A lookup has none.
+- **Before it**, any failure means nothing was submitted: 422 `action_failed`, and the same idempotency key may be
+  retried. That includes not finding the control to click.
+- **Once it has started**, the runner first persists "submit started" and then clicks. Any failure or timeout from
+  there on is 409 `outcome_unknown`. The step is never retried, and the call is never re-run automatically.
+- **After success**, `verify` runs. The write is already recorded as succeeded; the result adds
+  `write.verified: true|false` and what the lookup returned, so a confirmed write can be told from an unconfirmed one.
+
+### Safety
+
+- **Requests:** every request the browser makes passes the same SSRF guard as rendering, plus the plan's `block`
+  list. `goto` and upload URLs are checked too.
+- **Secrets:** `auth` values are never logged, never put in progress messages or run stats, and are scrubbed from
+  error text. Jobs store them encrypted, as before.
+- **AI:** only `captcha` steps can reach the AI client, and they try the non-AI solver first. A plan without one
+  runs at zero tokens.
+- **Limits:** at most 80 steps, 5 captcha attempts, 3 attempts per step, and a deadline for the whole run.
+
+### Run stats
+
+A lookup or write job's result carries `plan_run`:
+
+- **Path taken:** `outcomes` (ok, skipped or failed per step), `alternatives` (the winner per `any_of`), `targets`
+  (which target alternative matched, when not the first), `retries` and `failed_step`.
+- **Login:** `session` (`reused`, `logged_in`) and `captcha` (attempts and AI calls per captcha step).
+- **AI:** `ai_calls`, `ai_tokens` and `ai_by_step`.
+- **Write:** `committed`.
+
+### Worked examples: BBMP Sahaya 2.0
+
+Both are translations of the code connector, step for step, and are seeded as **draft** actions next to the locked
+code actions on `smartoneblr-com`, so they can be compared before an admin locks them.
+
+- **`track_issue_plan`** (`site_plans/smartoneblr-com/track_issue.json`): open the status page → fill the complaint
+  number → click search, else press Enter → wait for the result → read the staff panel as label → value → map
+  "Registered" / "Closed" to `OPEN` / `CLOSED`. It needs no login and no AI.
+- **`report_issue_plan`** (`report_issue.json`): open the portal → reuse the session or log in through the captcha →
+  open Sahaya 2.0 → category → sub-category (waits for the list) → description → photo (when `media_url` is sent) →
+  location → **Submit (commit)** → confirm the popup → read the complaint ID from the acknowledgement → verify with
+  `track_issue`.
+
+### Not built yet
+
+- **Recording or AI-drafting a plan.** Plans are written by hand (or translated from a connector) and added with the
+  API. Repair of a broken step is manual: add a new version with the fixed target and lock it.
+- **`request` steps inside action plans** (sites whose forms are plain API calls), and paging in lookups.
+- **OTP or other steps that need a person.**
+

@@ -123,6 +123,19 @@ CODE_ACTIONS = [
 ]
 
 
+# action plans shipped as data (site_plans/<site_id>/<file>.json), seeded as DRAFT version 1 next to the code
+# actions so an admin can compare them and lock the plan when it proves equivalent
+PLAN_ACTIONS = [
+    ("https://www.smartoneblr.com", "track_issue_plan", "issue_status", "track_issue"),
+    ("https://www.smartoneblr.com", "report_issue_plan", "issue", "report_issue"),
+]
+
+
+def _plan_kind(plan: dict) -> tuple[str, str]:
+    """→ (kind, mode) of an action plan."""
+    return ("write", "write") if plan["mode"] == "write" else ("read", "lookup")
+
+
 def schemas_for(mode: str, connector_action: str | None = None) -> tuple[dict, dict]:
     if mode == "list":
         return LIST_INPUT_SCHEMA, list_output_schema(EVENT_DATA_SCHEMA)
@@ -157,6 +170,42 @@ def seed_code_actions() -> int:
     if created:
         log.info("code_actions_seeded", created=created)
     return created
+
+
+def seed_plan_actions() -> int:
+    """Idempotent: create the shipped action plans as draft actions (version 1, draft). Existing actions are
+    left alone, so an admin's later versions are never overwritten."""
+    from scraper0 import site_plans
+    from scraper0.core import action_plans
+    created = 0
+    with session_scope() as s:
+        for base, name, entity, file in PLAN_ACTIONS:
+            site_id, base_url, host = parse_base_url(base)
+            if s.get(Site, site_id) is None:
+                s.add(Site(site_id=site_id, base_url=base_url, name=host))
+                s.flush()
+            if s.scalar(select(SiteAction).where(SiteAction.site_id == site_id, SiteAction.name == name)):
+                continue
+            plan = action_plans.validate(site_plans.load(site_id, file))
+            _add_plan_action(s, site_id, name, entity, plan, [base_url], None)
+            created += 1
+    if created:
+        log.info("plan_actions_seeded", created=created)
+    return created
+
+
+def _add_plan_action(s, site_id: str, name: str, entity: str, plan: dict, seeds: list[str],
+                     tenant_id: str | None) -> SiteAction:
+    from scraper0.core import action_plans
+    kind, mode = _plan_kind(plan)
+    ins, outs = action_plans.schemas(plan)
+    a = SiteAction(site_id=site_id, name=name, kind=kind, mode=mode, entity=entity, implementation="plan",
+                   seed_urls=seeds, status="draft", input_schema=ins, output_schema=outs, created_by_tenant=tenant_id)
+    s.add(a)
+    s.flush()
+    s.add(ActionVersion(action_id=a.id, version=1, status="draft",
+                        implementation_snapshot={"implementation": "plan", "plan": plan}))
+    return a
 
 
 # ------------------------------------------------------------------ serialisation
@@ -247,9 +296,11 @@ def create_action(site_id: str, body: dict, tenant_id: str | None) -> dict:
     name = body.get("name")
     if not isinstance(name, str) or not ACTION_NAME.fullmatch(name):
         raise SiteError(422, "invalid_input", "name must be snake_case (a-z, 0-9, _; ≤ 64 characters)")
+    if body.get("plan") is not None:
+        return _create_plan_action(site_id, name, body, tenant_id)
     kind = body.get("kind", "read")
     if kind == "write":
-        raise SiteError(422, "invalid_input", "write actions are code only for now (connectors)")
+        raise SiteError(422, "invalid_input", "a write action needs a plan (\"plan\": an action plan) or a code connector")
     if kind != "read":
         raise SiteError(422, "invalid_input", "kind must be read or write")
     entity = body.get("entity", "event")
@@ -276,6 +327,46 @@ def create_action(site_id: str, body: dict, tenant_id: str | None) -> dict:
         s.add(a)
         s.flush()
         return action_public(a)
+
+
+def _checked_plan(plan) -> dict:
+    from scraper0.core import action_plans
+    from scraper0.core.plans import PlanError
+    try:
+        return action_plans.validate(plan)
+    except PlanError as e:
+        raise SiteError(422, "invalid_input", f"plan: {e}") from None
+
+
+def _create_plan_action(site_id: str, name: str, body: dict, tenant_id: str | None) -> dict:
+    """A lookup or write action from an action plan (core/action_plans.py): draft version 1 holds the plan."""
+    plan = _checked_plan(body["plan"])
+    entity = body.get("entity") or ("record" if plan["mode"] == "lookup" else "submission")
+    if not isinstance(entity, str) or not ACTION_NAME.fullmatch(entity):
+        raise SiteError(422, "invalid_input", "entity must be snake_case")
+    with session_scope() as s:
+        site = get_site(s, site_id)
+        if s.scalar(select(SiteAction).where(SiteAction.site_id == site_id, SiteAction.name == name)):
+            raise SiteError(409, "action_exists", f"site {site_id!r} already has an action {name!r}")
+        return action_public(_add_plan_action(s, site_id, name, entity, plan, [site.base_url], tenant_id))
+
+
+def add_plan_version(site_id: str, name: str, plan) -> dict:
+    """A new draft version of a plan action (an edited or repaired plan). It takes effect when locked."""
+    plan = _checked_plan(plan)
+    with session_scope() as s:
+        a = get_action(s, site_id, name)
+        if a.implementation != "plan":
+            raise SiteError(422, "invalid_input", "only plan actions take a plan; list actions are learned")
+        if _plan_kind(plan) != (a.kind, a.mode):
+            raise SiteError(422, "invalid_input", f"the plan's mode must stay {a.mode}")
+        last = s.scalar(select(ActionVersion.version).where(ActionVersion.action_id == a.id)
+                        .order_by(ActionVersion.version.desc()).limit(1)) or 0
+        v = ActionVersion(action_id=a.id, version=last + 1, status="draft",
+                          implementation_snapshot={"implementation": "plan", "plan": plan})
+        s.add(v)
+        s.flush()
+        return version_public(v)
 
 
 def start_learn(site_id: str, name: str, tenant_id: str) -> dict:
@@ -319,6 +410,9 @@ def lock_version(site_id: str, name: str, version: int, locked_by: str) -> None:
                                                          ActionVersion.status == "locked")):
             old.status = "retired"
         v.status, v.locked_at, v.locked_by = "locked", now(), locked_by
+        if a.implementation == "plan":                        # the contract follows the locked plan
+            from scraper0.core import action_plans
+            a.input_schema, a.output_schema = action_plans.schemas((v.implementation_snapshot or {})["plan"])
         a.locked_version, a.status, a.consecutive_failures = version, "locked", 0
         a.last_scraped_at, a.last_item_count = None, None      # the next read refreshes with this version
 
@@ -331,6 +425,16 @@ def contract(site_id: str, name: str, base: str) -> dict:
         if a.mode == "list":
             body = {"options": {}, "freshness_hours": 48, "timeout_s": 60}
             extra = ""
+        elif a.implementation == "plan":
+            from scraper0.core import action_plans
+            plan = (v.implementation_snapshot or {})["plan"]
+            body = {"input": action_plans.example_input(plan)}
+            if (plan.get("auth") or {}).get("fields"):
+                body["auth"] = {f: f"<{f}>" for f in plan["auth"]["fields"]}
+            if a.mode == "write":
+                body["force"] = False
+            body["timeout_s"] = 300 if a.mode == "write" else 60
+            extra = " \\\n  -H 'Idempotency-Key: <your-unique-key>'" if a.mode == "write" else ""
         elif a.mode == "lookup":
             body = {"input": {"tracking_id": "<tracking_id>"} if a.connector_action == "TRACK_ISSUE" else {},
                     "timeout_s": 60}

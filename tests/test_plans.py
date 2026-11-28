@@ -61,7 +61,7 @@ def offset_api(total=25, size=10, ignore=False):
 @pytest.mark.parametrize("plan,msg", [
     ({"plan_version": 2, "steps": []}, "plan_version"),
     ({"plan_version": 1, "steps": [{"id": "a", "type": "teleport"}]}, "unknown step type"),
-    ({"plan_version": 1, "steps": [{"id": "a", "type": "browser"}]}, "reserved"),
+    ({"plan_version": 1, "steps": [{"id": "a", "type": "browser"}]}, "action plan"),
     ({"plan_version": 1, "steps": [{"id": "a", "type": "request", "url": "u"},
                                    {"id": "b", "type": "ai", "over": "a", "fields": ["name"]}]}, "uses_ai"),
     ({"plan_version": 1, "steps": [{"id": "a", "type": "request", "url": "u", "uses_ai": True}]}, "only ai, captcha"),

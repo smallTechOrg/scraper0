@@ -160,6 +160,13 @@ def versions(site_id: str, name: str, request: Request):
     return {"data": _call(sites_svc.list_versions, site_id, name)}
 
 
+@router.post("/sites/{site_id}/actions/{name}/versions", status_code=201)
+def add_version(site_id: str, name: str, request: Request, body: dict = Body(...)):
+    """A new draft version of a plan action: {"plan": <action plan>}."""
+    _admin(request)
+    return {"data": _call(sites_svc.add_plan_version, site_id, name, body.get("plan"))}
+
+
 @router.post("/sites/{site_id}/actions/{name}/versions/{n}/lock")
 def lock(site_id: str, name: str, n: int, request: Request):
     p = _admin(request)
