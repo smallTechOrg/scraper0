@@ -16,6 +16,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from scraper0.core.dates import IST
+from scraper0.core.signed_urls import expires_at, expires_at_iso
 from scraper0.db.models import AIVerdict, Item, Job, SiteAction, WriteRecord, new_id, now
 from scraper0.db.session import session_scope
 from scraper0.jobs import runner
@@ -31,6 +32,11 @@ DEFAULT_WRITE_TIMEOUT_S = 300
 MAX_WRITE_TIMEOUT_S = 600
 BROKEN_RETRY = timedelta(hours=1)    # a broken action re-tries its refresh at most this often
 QUEUED_TOO_LONG = timedelta(minutes=15)   # a refresh still queued after this was lost (never dispatched)
+# Stored items keep the site's image links, and signed ones (Airtable, S3…) expire within hours. A read whose
+# items' images expire within IMAGE_EXPIRY_MARGIN rescrapes first, as if the data were stale, so callers get
+# links they can still copy. MIN_IMAGE_RESCRAPE stops a loop on sites whose links outlive a scrape by less.
+IMAGE_EXPIRY_MARGIN = timedelta(minutes=10)
+MIN_IMAGE_RESCRAPE = timedelta(minutes=10)
 AI_BATCH = 8
 PROMPT_VERSION = 1
 MAX_CATEGORIES = 100
@@ -102,15 +108,44 @@ def options_hash(o: dict) -> str:
 
 # ------------------------------------------------------------------ refresh: start or join (one per site+action)
 
+def images_expiring(s, site_id: str, name: str, seq: int) -> bool:
+    """Does any item of the last scrape carry an image link that expires within IMAGE_EXPIRY_MARGIN?"""
+    if not seq:
+        return False
+    soon = now() + IMAGE_EXPIRY_MARGIN
+    for data in s.scalars(select(Item.data).where(Item.site_id == site_id, Item.action == name,
+                                                   Item.tenant_id.is_(None), Item.seen_seq == seq)):
+        exp = image_expiry(data)
+        if exp is not None and exp <= soon:
+            return True
+    return False
+
+
+def image_expiry(data: dict | None) -> datetime | None:
+    """From the stored field, or read off the link itself (items stored before the field existed)."""
+    data = data or {}
+    return _aware(_parse_iso(data.get("image_expires_at"))) or expires_at(data.get("image"))
+
+
+def _parse_iso(v) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00")) if v else None
+    except ValueError:
+        return None
+
+
 def ensure_refresh(site_id: str, name: str, tenant_id: str, version: int, freshness_h: float) -> str | None:
-    """→ id of the refresh job to wait for (started now or already running), or None when the data is fresh."""
+    """→ id of the refresh job to wait for (started now or already running), or None when the data is fresh.
+    Fresh means scraped within freshness_h *and* no stored image link about to expire."""
     cutoff = now() - timedelta(hours=freshness_h)
     start = None
     with session_scope() as s:
         a = sites_svc.get_action(s, site_id, name)
         scraped = _aware(a.last_scraped_at)
         if scraped is not None and scraped >= cutoff:
-            return None
+            if scraped > now() - MIN_IMAGE_RESCRAPE or not images_expiring(s, site_id, name, a.scrape_seq or 0):
+                return None
+            log.info("rescrape_for_expiring_images", site_id=site_id, action=name)
         if a.refresh_job_id:
             j = s.get(Job, a.refresh_job_id)
             if j is not None and j.status == "queued" and _aware(j.created_at) < now() - QUEUED_TOO_LONG:
@@ -319,7 +354,10 @@ def read_list(tenant_id: str, site_id: str, name: str, body: dict) -> dict:
     for r in rows:
         sel, cat = verdicts.get(r["id"], (True, None))
         if sel:
-            items.append({"id": r["id"], "updated_at": r["updated_at"], "data": {**r["data"], "category": cat}})
+            data = {**r["data"], "category": cat}
+            if "image_expires_at" not in data:
+                data["image_expires_at"] = expires_at_iso(data.get("image"))
+            items.append({"id": r["id"], "updated_at": r["updated_at"], "data": data})
     out = {"site_id": site_id, "action": name, "version": version, "items": items, "complete": complete,
            "scraped_at": scraped_at, "refresh_job_id": job_id, "health": health}
     if ai_error:

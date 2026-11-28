@@ -269,7 +269,7 @@ def test_learn_lock_contract_and_read_from_snapshot(app, tenants, acts):
     it = d["items"][1]
     assert re.fullmatch(r"itm_[0-9a-f]{24}", it["id"])
     assert set(it["data"]) == {"name", "start_time", "end_time", "address", "link", "organisation", "image", "category",
-                               "description", "latitude", "longitude", "is_online", "price", "source_url"}
+                               "description", "latitude", "longitude", "is_online", "price", "source_url", "image_expires_at"}
     assert it["data"]["link"] == "https://acts.org/activities?activity_id=act-0002" and it["data"]["category"] is None
 
     # second version: lock retires the first
@@ -576,55 +576,6 @@ def test_write_timeout_is_outcome_unknown_and_running_replays(app, tenants, repo
     assert out["r"].status_code == 200 and out["r"].json()["data"]["replayed"] is False and report.calls == 2
 
 
-# ------------------------------------------------------------------ image copies
-
-def _png(color) -> bytes:
-    import io
-
-    from PIL import Image
-    out = io.BytesIO()
-    Image.new("RGB", (2400, 1200), color).save(out, "PNG")
-    return out.getvalue()
-
-
-def test_expiring_images_are_copied_and_served(app, tenants, everest, settings, monkeypatch):
-    """Signed image URLs (Airtable, S3) expire within hours: stored items point at our own permanent copy."""
-    from scraper0.services import media
-    monkeypatch.setattr(settings, "copy_images", True)
-    imgs = {f"https://cdn.x/{i}.jpg": _png((i * 40, 10, 10)) for i in range(1, 6)}
-    calls = []
-
-    def fake_download(url):
-        calls.append(url)
-        base = url.split("?")[0]
-        return (imgs[base], "image/png") if base in imgs else None
-    monkeypatch.setattr(media, "download", fake_download)
-    for e in everest.events:
-        e["image"] += "?sig=abc&expires=1"
-    everest.events[1]["image"] = "https://cdn.x/missing.jpg"         # can't be copied: keeps its URL
-
-    d = read(tenants["acme_key"]).json()["data"]
-    by_name = {i["data"]["name"]: i["data"] for i in d["items"]}
-    lake = by_name["Lake Cleanup"]["image"]
-    assert lake.startswith(settings.public_base_url + "/v2/media/") and "sig=" not in lake
-    assert by_name["Tree Planting"]["image"] == "https://cdn.x/missing.jpg"
-
-    r = TestClient(app).get(lake[len(settings.public_base_url):])          # public: no login, no key
-    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg" and "immutable" in r.headers["cache-control"]
-    from PIL import Image
-    import io
-    assert max(Image.open(io.BytesIO(r.content)).size) == media.MAX_SIDE   # shrunk from 2400 px
-
-    # the next scrape gets a new signature for the same image: the stored copy is reused, nothing downloaded
-    n = len(calls)
-    for e in everest.events:
-        e["image"] = e["image"].replace("sig=abc", "sig=def")
-    from scraper0.services.site_runs import store_items
-    store_items("teameverest-ngo", "fetch_events", 1, "j", [dict(e) for e in everest.events if e["name"] != "Old Drive"])
-    assert [c for c in calls[n:] if "missing" not in c] == []
-    assert TestClient(app).get("/v2/media/" + "0" * 40).status_code == 404
-
-
 def test_repair_relearns_from_the_live_site(app, tenants, acts):
     """Learn/repair must look at the site again, not replay the stored recipe."""
     acme = tenants["acme"]
@@ -729,3 +680,69 @@ def test_items_filters_and_sort(app, tenants, everest):
     page = acme.get("/v2/sites/teameverest-ngo/actions/fetch_events/items?limit=2&sort=updated").json()
     assert page["total"] == 4 and len(page["data"]) == 2
     assert acme.get("/v2/sites/teameverest-ngo/actions/nope/items").status_code == 404
+
+
+# ------------------------------------------------------------------ signed image links
+
+def _s3(minutes: int) -> str:
+    from datetime import timezone
+    signed = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return (f"https://b.s3.amazonaws.com/x.jpg?X-Amz-Date={signed}&X-Amz-Expires={minutes * 60}"
+            "&X-Amz-Signature=abc")
+
+
+def _age_last_scrape(minutes: int):
+    with session_scope() as s:
+        a = s.scalars(select_action("teameverest-ngo", "fetch_events")).one()
+        a.last_scraped_at = a.last_scraped_at - timedelta(minutes=minutes)
+
+
+def select_action(site_id, name):
+    from sqlalchemy import select
+
+    from scraper0.db.models import SiteAction
+    return select(SiteAction).where(SiteAction.site_id == site_id, SiteAction.name == name)
+
+
+def test_expiring_image_links_trigger_a_rescrape(app, tenants, everest):
+    """scraper0 stores image links only. Signed links that are about to expire make a read rescrape first, so
+    the caller gets links it can still copy; links with no expiry (or a far one) don't."""
+    key = tenants["acme_key"]
+    for e in everest.events:
+        e["image"] = _s3(5)                                            # expires in 5 minutes
+    d = read(key).json()["data"]
+    assert everest.calls == 1
+    it = d["items"][0]["data"]
+    assert it["image"].startswith("https://b.s3.amazonaws.com/") and it["image_expires_at"].endswith("Z")
+
+    read(key)                                                          # scraped moments ago: no loop
+    assert everest.calls == 1
+    _age_last_scrape(20)                                               # still well inside freshness_hours=48
+    for e in everest.events:
+        e["image"] = _s3(120)
+    d = read(key).json()["data"]
+    assert everest.calls == 2 and d["complete"] is True                # rescraped for the expiring links
+    _age_last_scrape(20)
+    read(key)
+    assert everest.calls == 2                                          # links now valid for 2 h: stored items
+
+
+def test_unsigned_image_links_have_no_expiry(app, tenants, everest):
+    d = read(tenants["acme_key"]).json()["data"]
+    assert all(i["data"]["image_expires_at"] is None for i in d["items"])
+    _age_last_scrape(60)
+    read(tenants["acme_key"])
+    assert everest.calls == 1
+
+
+def test_items_stored_before_the_expiry_field_still_rescrape(app, tenants, everest):
+    from sqlalchemy import select as sel
+    for e in everest.events:
+        e["image"] = _s3(5)
+    read(tenants["acme_key"])
+    with session_scope() as s:                                         # as migrated rows look: no field
+        for it in s.scalars(sel(Item)):
+            it.data = {k: v for k, v in it.data.items() if k != "image_expires_at"}
+    _age_last_scrape(20)
+    d = read(tenants["acme_key"]).json()["data"]
+    assert everest.calls == 2 and d["items"][0]["data"]["image_expires_at"]

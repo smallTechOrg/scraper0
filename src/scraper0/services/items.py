@@ -189,8 +189,6 @@ def store_run_items(tenant_id: str, entity_key: str, items: list[dict], job_id: 
     total = {"created": 0, "updated": 0, "unchanged": 0}
     if not items:
         return total
-    from scraper0.services import media
-    media.swap_images(items)                   # signed image URLs expire: keep our own copy (no DB session open)
     if private or not is_shared_entity(entity_key):
         site_id = None
         if not private and seeds:

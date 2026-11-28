@@ -53,6 +53,8 @@ For each enabled source:
    - **Dedupe** on `events.external_id` (= scraper0 item `id`; new nullable, unique column), and keep the existing
      `name + start_time` check for older rows.
    - **Keep the current rules:** an event needs a name, a start time and an image (copied to GCS), and it goes to the PENDING approval queue.
+     Copy the image during the import itself: scraper0 returns the site's own link, and when `image_expires_at` is set the
+     link stops working at that time.
    - **Portal:** the enum value for the three known sites (`teameverest-ngo`→TEAMEVEREST, `mybharat-gov-in`→MYBHARATGOVIN,
      `ivolunteer-in`→IVOLUNTEERIN), otherwise a new enum value `WEB`. The new column `events.source_site_id` stores the
      `site_id`.

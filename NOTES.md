@@ -99,3 +99,12 @@ last seen and last changed.
 - **Verified:** 161 tests on SQLite and Postgres 14 (CONNECTION LIMIT 3); migration up/down/up + `alembic check` clean
   on both, with seeded v1 + v2 rows; ruff, tsc, lint and build clean.
 
+
+
+## Images: links only (2026-11-28)
+
+scraper0 briefly kept its own copies of item images (migration 0003, `/v2/media`). Decided against it: storing every
+scraped image isn't scraper0's job, and the caller (hashtaglocal) copies images itself. Migration 0005 puts the
+original links back and drops the `media` table. For signed links that expire (Airtable's last ~2 h), items carry
+`image_expires_at` (`core/signed_urls.py`), and a read rescrapes first when stored links are about to expire, so callers
+always get links that still work at the time of the read.

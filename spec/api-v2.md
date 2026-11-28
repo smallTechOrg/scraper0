@@ -93,8 +93,8 @@ POST /v2/sites/{site_id}/actions/{name}/read
 errors: 404 site_not_onboarded | 404 action_not_available (no locked version) | 422 invalid_input
 ```
 
-`EventData` = `{name, start_time, end_time, address, link, organisation, image, category, description, latitude,
-longitude, is_online, price, source_url}`, where times are ISO-8601 UTC (`2026-03-14T04:30:00.000Z`). `category` is one of the
+`EventData` = `{name, start_time, end_time, address, link, organisation, image, image_expires_at, category, description,
+latitude, longitude, is_online, price, source_url}`, where times are ISO-8601 UTC (`2026-03-14T04:30:00.000Z`). `category` is one of the
 caller's `categories`, or `null` when none were sent.
 
 - **Shared store:** items are stored per (site, action), not per tenant, in the one `items` table (v1 `/v1/items`
@@ -106,6 +106,11 @@ caller's `categories`, or `null` when none were sent.
   `(tenant, item id, item content hash, options hash)`, so repeated reads cost no AI. Items the filter rejects are
   left out. If AI is unavailable, nothing is filtered out, `category` is `null`, and the response carries
   `"ai_error": "<message>"`.
+- **Images are links, not copies.** scraper0 stores the site's image URL; copying the image is the caller's job.
+  `image_expires_at` is set when the link is signed and carries its expiry (Airtable, S3, Google Cloud Storage,
+  CloudFront, Azure SAS), else `null`: copy those images straight away. A read whose stored items' image links expire
+  within 10 minutes rescrapes first (within `timeout_s`), even inside `freshness_hours`, so the links it returns still
+  work. It won't rescrape again within 10 minutes of the last scrape.
 - **Refresh:** at most one refresh runs per (site, action) at a time. A concurrent read joins the running one.
 - **Contract test:** `curl` in the Contract runs this call with the default options.
 

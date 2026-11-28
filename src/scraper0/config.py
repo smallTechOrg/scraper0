@@ -59,7 +59,6 @@ class Settings(BaseSettings):
     job_mode: JobMode = "thread"
     job_workers: int = Field(2, ge=1, le=8)
     internal_token: SecretStr | None = None          # shared secret for /internal/* (Cloud Tasks / Scheduler)
-    copy_images: bool = True                          # keep our own copy of item images (services/media.py)
     public_base_url: str = "http://127.0.0.1:5001"   # where Cloud Tasks calls back
     cloud_tasks_queue: str | None = None             # projects/<p>/locations/<l>/queues/<q>
     cloud_tasks_service_account: str | None = None

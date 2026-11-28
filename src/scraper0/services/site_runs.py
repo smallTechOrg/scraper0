@@ -14,10 +14,10 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from scraper0.core.dates import IST
+from scraper0.core.signed_urls import expires_at_iso
 from scraper0.core.entities import EVENT_SPEC
 from scraper0.db.models import ActionVersion, SiteAction, WriteRecord, now
 from scraper0.db.session import session_scope
-from scraper0.services import media
 from scraper0.services import sites as sites_svc
 from scraper0.services import items as items_svc
 from scraper0.services.items import batch_keys
@@ -26,7 +26,9 @@ log = structlog.get_logger(__name__)
 
 EVENT_FIELDS = ("name", "start_time", "end_time", "address", "link", "organisation", "image", "description",
                 "latitude", "longitude", "is_online", "price", "source_url")
-_HASH_EXCLUDE = {"image"}        # CDN/signed image URLs change on every scrape without the event changing
+# CDN/signed image URLs change on every scrape without the event changing. scraper0 stores image *links* only;
+# copying the image is the caller's job, and image_expires_at says how soon (core/signed_urls.py).
+_HASH_EXCLUDE = {"image", "image_expires_at"}
 KEEP_PAST_DAYS = 1               # the store keeps items from yesterday (IST) on; older ones are not stored
 
 
@@ -39,6 +41,7 @@ class ScrapeFailed(Exception):
 def event_data(d: dict) -> dict:
     """Engine/connector event dict → EventData (without `category`, which is per tenant)."""
     out = {k: d.get(k) for k in EVENT_FIELDS}
+    out["image_expires_at"] = expires_at_iso(out["image"])
     out["is_online"] = bool(out["is_online"])
     out["source_url"] = out["source_url"] or out["link"]
     for k in ("latitude", "longitude"):
@@ -312,7 +315,6 @@ def store_items(site_id: str, name: str, version: int, job_id: str, events: list
         record_failure(site_id, name, f"0 valid items (the last run had {prev})")
         return None
     datas = [event_data(e) for e in events]
-    media.swap_images(datas)                   # signed image URLs expire: keep our own copy (no DB session open)
     seen, payload = set(), []
     for k, d in zip(batch_keys(datas), datas):
         if k not in seen:
