@@ -4,6 +4,7 @@
  * How a version runs, made readable: the recipe (plans) of a learned version, or the code connector of a code
  * version. Plans are documented in spec/recipes.md; this view reads them loosely (unknown keys are shown raw).
  */
+import { ActionPlanView, type ActionPlan } from "@/components/action-plan-view";
 import { Fragment, useState, type ReactNode } from "react";
 import { Badge, Button, CopyButton, cx } from "@/components/ui";
 
@@ -59,6 +60,7 @@ export interface Snapshot {
   connector?: string;
   action?: string;
   plans?: Array<{ seed: string; plan: Plan }>;
+  plan?: ActionPlan;
   learn?: { ai_calls?: number; notes?: string[]; by_method?: Record<string, number> };
   check_run?: RunStats[];
 }
@@ -84,7 +86,7 @@ export interface RunStats {
 
 export function hasRecipe(snapshot: Record<string, unknown> | null | undefined): boolean {
   const s = snapshot as Snapshot | null | undefined;
-  return !!s && (s.implementation === "code" || (s.plans?.length ?? 0) > 0);
+  return !!s && (s.implementation === "code" || (s.plans?.length ?? 0) > 0 || s.plan?.kind === "action");
 }
 
 // ------------------------------------------------------------------ templated values
@@ -414,6 +416,13 @@ export function RecipeView({ snapshot }: { snapshot: Record<string, unknown> | n
       <div className="px-4 py-3 text-sm">
         Code connector: <Mono>{[s.connector, s.action].filter(Boolean).join(" → ")}</Mono>
         <p className="mt-1 text-xs text-muted">Reviewed and tested code in the scraper0 repository; it has no recipe to show.</p>
+      </div>
+    );
+  }
+  if (s.plan?.kind === "action") {
+    return (
+      <div className="px-4 py-3">
+        <ActionPlanView plan={s.plan} />
       </div>
     );
   }
