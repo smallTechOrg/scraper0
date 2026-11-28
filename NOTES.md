@@ -81,3 +81,21 @@ Contract: [spec/api-v2.md](spec/api-v2.md) (deviations recorded at its end); des
 - **Verified:** `uv run pytest` 154 passed (14 new in `tests/test_v2.py`) on SQLite and on Postgres 14 (`scraper0` user,
   `CONNECTION LIMIT 3`); migration up/down/up and `alembic check` clean on both; `ruff` clean.
 - **Not verified:** live learn of a real site through v2, real AI filtering, BBMP writes live (same gaps as v0.1).
+
+## One item store (2026-11-28)
+The user's call: one `items` entity, related to sites; every rerun updates the items; no versions, just when they were
+last seen and last changed.
+- **Model:** `items` (migration `0004`) replaces v1 per-tenant `items` and v2 `site_items`. Site items (site_id +
+  action) are shared; private items (`tenant_id` set: uploads/ingest, tenant-defined entities) are per tenant.
+  `item_changes` is one global log; a tenant's feed joins it with what the tenant can see.
+- **Writers:** `services/items.store_run_items` for v1 jobs (crawl → seed site; connector → its code action's site;
+  ingest → private) and `upsert_rows` (shared with `site_runs._store`, which also sets `seen_seq` and the action's
+  freshness). v1 events go through the same `normalise` + `event_data` as v2 refreshes, so ids and data match.
+- **Migration:** site_items keep their ids; v1 items with an http link become site items (new sites registered), the
+  rest private; a collision keeps the most recently seen row and the v2 `seen_seq`; the change feed restarts with one
+  "created" per item. Downgrade splits them back.
+- **Dashboard:** Items has site filter + sort (last seen default) and Site / Last seen / Last changed / First seen
+  columns; Sites → action → Items tab.
+- **Verified:** 161 tests on SQLite and Postgres 14 (CONNECTION LIMIT 3); migration up/down/up + `alembic check` clean
+  on both, with seeded v1 + v2 rows; ruff, tsc, lint and build clean.
+

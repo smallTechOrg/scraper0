@@ -34,6 +34,8 @@ GET  /v2/sites/{site_id}/actions/{name}             → {"data": Action}
 POST /v2/sites/{site_id}/actions/{name}/learn       (tenant admin)  → 202 {"data": {"job_id", "version": n}}
      Learns from the live site and creates a new **draft** version. The job result holds the preview.
 GET  /v2/sites/{site_id}/actions/{name}/versions    → {"data": [Version]}
+GET  /v2/sites/{site_id}/actions/{name}/items?q=&sort=last_seen|updated|first_seen&limit=&offset=
+     → {"data": [Item], "total"}   Everything stored for this action (Item as in v1 /v1/items), for the dashboard.
 POST /v2/sites/{site_id}/actions/{name}/versions/{n}/lock   (tenant admin)
      → {"data": Contract}        Exactly one locked version per action; the previously locked one becomes "retired".
 POST /v2/sites/{site_id}/actions/{name}/repair      (tenant admin)  → 202 {"data": {"job_id", "version": n}}
@@ -95,8 +97,9 @@ errors: 404 site_not_onboarded | 404 action_not_available (no locked version) | 
 longitude, is_online, price, source_url}`, where times are ISO-8601 UTC (`2026-03-14T04:30:00.000Z`). `category` is one of the
 caller's `categories`, or `null` when none were sent.
 
-- **Shared store:** items are stored per (site, action), not per tenant. Every tenant reading a site sees the same
-  items. Item `id` = `itm_` + the first 24 hex characters of sha256(site_id | action | item_key), where `item_key` is the canonical link,
+- **Shared store:** items are stored per (site, action), not per tenant, in the one `items` table (v1 `/v1/items`
+  lists the same rows). Every tenant reading a site sees the same items, and v1 jobs on the site (crawl, connector)
+  update them too. A read returns the items seen by the last successful v2 refresh only. Item `id` = `itm_` + the first 24 hex characters of sha256(site_id | action | item_key), where `item_key` is the canonical link,
   or link + `#` + identity hash when several items share a link. It is stable for the life of the item. `updated_at`
   changes only when the item's content changes.
 - **Filtering per request:** `from`, `include_online`, then the AI filter and categories. AI verdicts are cached in

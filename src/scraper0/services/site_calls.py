@@ -16,7 +16,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from scraper0.core.dates import IST
-from scraper0.db.models import AIVerdict, Job, SiteAction, SiteItem, WriteRecord, new_id, now
+from scraper0.db.models import AIVerdict, Item, Job, SiteAction, WriteRecord, new_id, now
 from scraper0.db.session import session_scope
 from scraper0.jobs import runner
 from scraper0.services import sites as sites_svc
@@ -309,8 +309,8 @@ def read_list(tenant_id: str, site_id: str, name: str, body: dict) -> dict:
         seq, health, scraped_at = a.scrape_seq or 0, "broken" if a.status == "broken" else "ok", _iso(a.last_scraped_at)
         rows = [] if seq == 0 else [
             {"id": i.id, "updated_at": _iso(i.updated_at), "content_hash": i.content_hash, "data": dict(i.data)}
-            for i in s.scalars(select(SiteItem).where(SiteItem.site_id == site_id, SiteItem.action == name,
-                                                      SiteItem.seen_seq == seq))]
+            for i in s.scalars(select(Item).where(Item.site_id == site_id, Item.action == name,
+                                                  Item.tenant_id.is_(None), Item.seen_seq == seq))]
     rows = [r for r in rows if _starts_on_or_after(r["data"], o["from"])
             and (o["include_online"] or not r["data"].get("is_online"))]
     rows.sort(key=lambda r: (r["data"].get("start_time") or "9999", r["data"].get("name") or "", r["id"]))

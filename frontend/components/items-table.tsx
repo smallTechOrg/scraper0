@@ -9,6 +9,8 @@ export interface ItemRow {
   data: Record<string, unknown>;
   /** Extra trailing cell (e.g. timestamps on stored items). */
   meta?: ReactNode;
+  /** Several extra trailing cells, one per `metaHeaders` entry. */
+  metaCells?: ReactNode[];
 }
 
 const MAX_COLUMNS = 7;
@@ -108,11 +110,14 @@ export function ItemsTable({
   rows,
   entity,
   metaHeader,
+  metaHeaders,
   fieldOrder,
 }: {
   rows: ItemRow[];
   entity?: string;
   metaHeader?: string;
+  /** Headers for `ItemRow.metaCells` (several trailing columns). */
+  metaHeaders?: string[];
   /** Preferred column order (e.g. the entity's field names). */
   fieldOrder?: string[];
 }) {
@@ -135,7 +140,7 @@ export function ItemsTable({
     return [...new Set(ordered)].slice(0, MAX_COLUMNS);
   }, [rows, event, fieldOrder]);
 
-  const colCount = (event ? 4 : columns.length) + 1 + (metaHeader ? 1 : 0);
+  const colCount = (event ? 4 : columns.length) + 1 + (metaHeader ? 1 : 0) + (metaHeaders?.length ?? 0);
 
   return (
     <Table>
@@ -152,6 +157,7 @@ export function ItemsTable({
             columns.map((c) => <Th key={c}>{c.replace(/_/g, " ")}</Th>)
           )}
           {metaHeader && <Th>{metaHeader}</Th>}
+          {metaHeaders?.map((h) => <Th key={h}>{h}</Th>)}
           <Th className="w-0">
             <span className="sr-only">Details</span>
           </Th>
@@ -173,6 +179,11 @@ export function ItemsTable({
                   ))
                 )}
                 {metaHeader && <Td className="whitespace-nowrap text-xs text-muted">{r.meta}</Td>}
+                {metaHeaders?.map((h, i) => (
+                  <Td key={h} className="whitespace-nowrap text-xs text-muted">
+                    {r.metaCells?.[i]}
+                  </Td>
+                ))}
                 <Td>
                   <button
                     type="button"
@@ -198,5 +209,82 @@ export function ItemsTable({
         })}
       </tbody>
     </Table>
+  );
+}
+
+function When({ at, label }: { at: string | null | undefined; label: string }) {
+  if (!at) return <span>—</span>;
+  return (
+    <time dateTime={at} title={`${label} ${formatDate(at)}`}>
+      {timeAgoShort(at)}
+    </time>
+  );
+}
+
+function timeAgoShort(iso: string): string {
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 86400 * 30) return `${Math.floor(s / 86400)}d ago`;
+  return formatDate(iso);
+}
+
+export interface StoredItemLike {
+  id: string;
+  entity: string;
+  data: Record<string, unknown>;
+  site_id: string | null;
+  action: string | null;
+  private: boolean;
+  first_seen_at: string;
+  last_seen_at: string;
+  updated_at: string;
+}
+
+/**
+ * Stored items with their timestamps: first seen, last seen (any run that saw it) and last changed
+ * (its content changed). `showSite` adds a Site column (the Items page; the Sites page already knows it).
+ */
+export function StoredItemsTable({
+  items,
+  entity,
+  fieldOrder,
+  showSite = true,
+}: {
+  items: StoredItemLike[];
+  entity?: string;
+  fieldOrder?: string[];
+  showSite?: boolean;
+}) {
+  const headers = [...(showSite ? ["Site"] : []), "Last seen", "Last changed", "First seen"];
+  return (
+    <ItemsTable
+      entity={entity}
+      fieldOrder={fieldOrder}
+      metaHeaders={headers}
+      rows={items.map((it) => ({
+        key: it.id,
+        data: entity ? it.data : { ...it.data, entity: it.entity },
+        metaCells: [
+          ...(showSite
+            ? [
+                it.site_id ? (
+                  <span key="site" title={it.action ?? undefined}>
+                    {it.site_id}
+                    {it.action && <span className="text-subtle"> · {it.action}</span>}
+                    {it.private && <Badge className="ml-1">private</Badge>}
+                  </span>
+                ) : (
+                  <Badge key="site">{it.private ? "private upload" : "—"}</Badge>
+                ),
+              ]
+            : []),
+          <When key="seen" at={it.last_seen_at} label="Last seen" />,
+          <When key="changed" at={it.updated_at} label="Content last changed" />,
+          <When key="first" at={it.first_seen_at} label="First seen" />,
+        ],
+      }))}
+    />
   );
 }

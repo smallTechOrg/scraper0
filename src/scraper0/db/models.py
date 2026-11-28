@@ -255,28 +255,36 @@ class Source(Base):
 
 
 class Item(Base):
+    """Every stored item, in one table. A site item (site_id + action set) is shared by every tenant: whichever run
+    scrapes that site (a v2 refresh, a v1 crawl or connector job, any tenant) updates the same row, and its id
+    is itm_ + sha256(site_id|action|item_key)[:24]. A private item (tenant_id set, action null: uploads, and
+    tenant-defined entities) is visible to that tenant only; its id hashes "tenant:" + tenant_id instead."""
     __tablename__ = "items"
-    __table_args__ = (UniqueConstraint("tenant_id", "entity_key", "item_key", name="uq_item"),)
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    tenant_id: Mapped[str] = mapped_column(String(32))
+    __table_args__ = (UniqueConstraint("site_id", "action", "item_key", name="uq_item_site"),
+                      UniqueConstraint("tenant_id", "entity_key", "item_key", name="uq_item_tenant"),
+                      Index("ix_items_action", "site_id", "action", "seen_seq"),
+                      Index("ix_items_last_seen", "last_seen_at"))
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    site_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    action: Mapped[str | None] = mapped_column(String(64), nullable=True)
     entity_key: Mapped[str] = mapped_column(String(120))
+    tenant_id: Mapped[str | None] = mapped_column(String(32), nullable=True)   # set only on private items
     item_key: Mapped[str] = mapped_column(String(500))                           # canonical link or fingerprint
     data: Mapped[dict] = mapped_column(JSON)
     content_hash: Mapped[str] = mapped_column(String(64))
-    source_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(TS, default=now)
-    last_seen_at: Mapped[datetime] = mapped_column(TS, default=now)
-    changed_at: Mapped[datetime] = mapped_column(TS, default=now)
+    last_seen_at: Mapped[datetime] = mapped_column(TS, default=now)              # any run that saw it
+    updated_at: Mapped[datetime] = mapped_column(TS, default=now)                # its content last changed
+    seen_seq: Mapped[int] = mapped_column(Integer, default=0)                    # SiteAction.scrape_seq of the last v2 refresh that saw it
+    job_id: Mapped[str | None] = mapped_column(String(32), nullable=True)        # last job that saw it
 
 
 class ItemChange(Base):
-    """Append-only change log; its id is the change-feed cursor."""
+    """Append-only change log for all items; its id is the change-feed cursor. Each tenant's feed shows the
+    changes of shared site items plus its own private items."""
     __tablename__ = "item_changes"
-    __table_args__ = (Index("ix_changes_tenant_id", "tenant_id", "id"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    tenant_id: Mapped[str] = mapped_column(String(32))
-    item_id: Mapped[int] = mapped_column(Integer)
-    entity_key: Mapped[str] = mapped_column(String(120))
+    item_id: Mapped[str] = mapped_column(String(32), index=True)
     change: Mapped[str] = mapped_column(String(16))                              # created | updated
     created_at: Mapped[datetime] = mapped_column(TS, default=now)
 
@@ -336,25 +344,6 @@ class ActionVersion(Base):
     created_at: Mapped[datetime] = mapped_column(TS, default=now)
     locked_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
     locked_by: Mapped[str | None] = mapped_column(String(320), nullable=True)
-
-
-class SiteItem(Base):
-    """Items of a list read action, shared by every tenant. id = itm_ + sha256(site_id|action|item_key)[:24]."""
-    __tablename__ = "site_items"
-    __table_args__ = (UniqueConstraint("site_id", "action", "item_key", name="uq_site_item"),
-                      Index("ix_site_items_action", "site_id", "action", "seen_seq"))
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    site_id: Mapped[str] = mapped_column(String(255))
-    action: Mapped[str] = mapped_column(String(64))
-    item_key: Mapped[str] = mapped_column(String(500))
-    data: Mapped[dict] = mapped_column(JSON)
-    content_hash: Mapped[str] = mapped_column(String(64))
-    first_seen_at: Mapped[datetime] = mapped_column(TS, default=now)
-    last_seen_at: Mapped[datetime] = mapped_column(TS, default=now)
-    updated_at: Mapped[datetime] = mapped_column(TS, default=now)
-    seen_seq: Mapped[int] = mapped_column(Integer, default=0)                   # SiteAction.scrape_seq when last seen
-    version: Mapped[int | None] = mapped_column(Integer, nullable=True)        # action version that scraped it
-    job_id: Mapped[str | None] = mapped_column(String(32), nullable=True)      # last refresh job that saw it
 
 
 class Media(Base):

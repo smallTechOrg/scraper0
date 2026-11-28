@@ -157,8 +157,9 @@ def test_api_keys_and_isolation(app, site, fake_llm):
     assert r.status_code == 200 and r.json()["data"]["status"] == "succeeded", r.text
     job_id = r.json()["data"]["id"]
     assert zed.get(f"/v1/jobs/{job_id}").status_code == 404                      # other tenant can't see it
-    assert zed.get("/v1/items").json()["total"] == 0
     assert k.get("/v1/items").json()["total"] == 2
+    shared = zed.get("/v1/items").json()                                         # …but site items are shared
+    assert shared["total"] == 2 and {i["site_id"] for i in shared["data"]} == {"ex-org"}
     ann.delete(f"/v1/api-keys/{key['id']}", headers=H)
     assert k.get("/v1/jobs").json()["error"]["code"] == "invalid_api_key"
 
@@ -306,7 +307,7 @@ def test_sources_and_tick(app, site, fake_llm, monkeypatch):
     assert s["last_job"]["status"] == "succeeded" and s["next_run_at"]
     t2 = internal.post("/internal/tick", headers={"Authorization": "Bearer internal-secret-token"}).json()["data"]
     assert t2["due"] == 0                                                         # not due again for an hour
-    assert ann.get("/v1/items").json()["data"][0]["source_id"] == s["id"]
+    assert ann.get("/v1/items").json()["data"][0]["job_id"] == s["last_job"]["id"]
 
 
 # ------------------------------------------------------------------ legacy /api/v1/scrape
@@ -377,12 +378,13 @@ def test_ai_unavailable_is_reported_not_silent(app, site):
 
 
 def test_listing_events_without_urls_do_not_overwrite_each_other(app):
-    from scraper0.services.items import upsert_items
-    evs = [{"name": "A", "start_time": "2026-12-01T04:30:00.000Z", "link": "https://ex.org/events"},
-           {"name": "B", "start_time": "2026-12-02T04:30:00.000Z", "link": "https://ex.org/events"},
-           {"name": "B", "start_time": "2026-12-02T04:30:00.000Z", "link": "https://ex.org/events"}]
-    assert upsert_items("t1", "event", evs) == {"created": 2, "updated": 0, "unchanged": 0}
-    assert upsert_items("t1", "event", evs)["unchanged"] == 2                    # keys stable across runs
+    from scraper0.services.items import store_run_items
+    evs = [{"name": "A", "start_time": "2099-12-01T04:30:00.000Z", "link": "https://ex.org/events"},
+           {"name": "B", "start_time": "2099-12-02T04:30:00.000Z", "link": "https://ex.org/events"},
+           {"name": "B", "start_time": "2099-12-02T04:30:00.000Z", "link": "https://ex.org/events"}]
+    seeds = ["https://ex.org/events"]
+    assert store_run_items("t1", "event", evs, seeds=seeds) == {"created": 2, "updated": 0, "unchanged": 0}
+    assert store_run_items("t1", "event", evs, seeds=seeds)["unchanged"] == 2    # keys stable across runs
 
 
 def test_change_password(app):

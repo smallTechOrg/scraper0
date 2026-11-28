@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { useConfirm } from "@/components/confirm";
-import { ItemsTable } from "@/components/items-table";
+import { ItemsTable, StoredItemsTable } from "@/components/items-table";
 import { useSession } from "@/components/session";
 import {
   ActionStatusBadge,
@@ -27,6 +27,7 @@ import {
   Field,
   Input,
   LoadingState,
+  Select,
   Stat,
   StatusBadge,
   Table,
@@ -40,6 +41,7 @@ import {
   type Action,
   type ActionContract,
   type ActionVersion,
+  type ItemSort,
   type Job,
   type ReadResult,
   type Site,
@@ -589,6 +591,98 @@ function ContractCard({ action, contract }: { action: Action; contract: AsyncSta
 // The panel
 // ---------------------------------------------------------------------------
 
+const ITEMS_PAGE = 50;
+
+/** Everything stored for this site + action: one shared store, updated by every run that sees an item. */
+function ActionItemsCard({ site, action }: { site: Site; action: Action }) {
+  const [sort, setSort] = useState<ItemSort>("last_seen");
+  const [page, setPage] = useState({ sort: "last_seen" as ItemSort, offset: 0 });
+  const offset = page.sort === sort ? page.offset : 0;
+  const items = useAsync(
+    () => sitesApi.items(site.site_id, action.name, { sort, limit: ITEMS_PAGE, offset }),
+    `action-items|${site.site_id}|${action.name}|${sort}|${offset}`,
+  );
+  const total = items.data?.total ?? 0;
+  const to = Math.min(offset + ITEMS_PAGE, total);
+  return (
+    <Card>
+      <CardHeader
+        title="Items"
+        description="Everything stored for this action, whichever run scraped it (any workspace, Jobs or a read). Last seen moves on every run; last changed only when the content changed."
+        actions={
+          <div className="flex items-center gap-2">
+            <label htmlFor="action-items-sort" className="text-xs text-subtle">
+              Sort
+            </label>
+            <Select id="action-items-sort" className="h-8 w-36" value={sort} onChange={(e) => setSort(e.target.value as ItemSort)}>
+              <option value="last_seen">Last seen</option>
+              <option value="updated">Last changed</option>
+              <option value="first_seen">First seen</option>
+            </Select>
+            <Button size="sm" onClick={items.reload} disabled={items.loading}>
+              Refresh
+            </Button>
+          </div>
+        }
+      />
+      {items.loading && !items.data ? (
+        <LoadingState />
+      ) : items.error ? (
+        <ErrorState error={items.error} onRetry={items.reload} />
+      ) : !items.data || items.data.items.length === 0 ? (
+        <EmptyState title="Nothing stored yet" description="Items appear after the first read or run of this site." />
+      ) : (
+        <>
+          <StoredItemsTable items={items.data.items} entity={action.entity ?? undefined} showSite={false} />
+          <nav aria-label="Items pages" className="flex items-center justify-between gap-3 px-4 py-3 text-sm sm:px-5">
+            <p className="text-muted tabular-nums">
+              {offset + 1}–{to} of {total}
+            </p>
+            <div className="flex gap-2">
+              <Button size="sm" disabled={offset === 0 || items.loading} onClick={() => setPage({ sort, offset: Math.max(0, offset - ITEMS_PAGE) })}>
+                Previous
+              </Button>
+              <Button size="sm" disabled={to >= total || items.loading} onClick={() => setPage({ sort, offset: offset + ITEMS_PAGE })}>
+                Next
+              </Button>
+            </div>
+          </nav>
+        </>
+      )}
+    </Card>
+  );
+}
+
+type PanelTab = "versions" | "items";
+
+function PanelTabs({ tab, onChange }: { tab: PanelTab; onChange: (t: PanelTab) => void }) {
+  const tabs: { id: PanelTab; label: string }[] = [
+    { id: "versions", label: "Versions & contract" },
+    { id: "items", label: "Items" },
+  ];
+  return (
+    <div role="tablist" aria-label="Action sections" className="flex gap-1 border-b border-border">
+      {tabs.map((t) => (
+        <button
+          key={t.id}
+          type="button"
+          role="tab"
+          id={`action-tab-${t.id}`}
+          aria-selected={tab === t.id}
+          aria-controls={`action-tabpanel-${t.id}`}
+          onClick={() => onChange(t.id)}
+          className={
+            "-mb-px border-b-2 px-3 py-2 text-sm font-medium " +
+            (tab === t.id ? "border-accent text-fg" : "border-transparent text-muted hover:text-fg")
+          }
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function ActionPanel({
   site,
   action,
@@ -611,12 +705,14 @@ export function ActionPanel({
   const [review, setReview] = useState<{ version: number; items: Array<Record<string, unknown>> | null } | null>(null);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  const [tab, setTab] = useState<PanelTab>("versions");
 
   const write = action.kind === "write";
   const learned = action.implementation === "learned";
   const broken = action.status === "broken";
   const canMutate = canAdmin && !write;
   const canLearn = learned && !write;
+  const hasItems = !write && !isLookup(action);          // list reads store items; lookups and writes don't
 
   const setRun = useCallback(
     (r: RunState | null) => {
@@ -825,17 +921,29 @@ export function ActionPanel({
         />
       )}
 
-      <VersionsCard
-        action={action}
-        versions={versions}
-        canMutate={canMutate}
-        canLearn={canLearn && !run}
-        onLearn={() => start("learn")}
-        onLock={lock}
-        busy={starting}
-      />
+      {hasItems && <PanelTabs tab={tab} onChange={setTab} />}
 
-      <ContractCard action={action} contract={contract} />
+      {(!hasItems || tab === "versions") && (
+        <div role={hasItems ? "tabpanel" : undefined} id="action-tabpanel-versions" aria-labelledby={hasItems ? "action-tab-versions" : undefined} className="space-y-6">
+          <VersionsCard
+            action={action}
+            versions={versions}
+            canMutate={canMutate}
+            canLearn={canLearn && !run}
+            onLearn={() => start("learn")}
+            onLock={lock}
+            busy={starting}
+          />
+
+          <ContractCard action={action} contract={contract} />
+        </div>
+      )}
+
+      {hasItems && tab === "items" && (
+        <div role="tabpanel" id="action-tabpanel-items" aria-labelledby="action-tab-items">
+          <ActionItemsCard site={site} action={action} />
+        </div>
+      )}
     </div>
   );
 }

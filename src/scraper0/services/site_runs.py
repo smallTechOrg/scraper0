@@ -15,10 +15,11 @@ from sqlalchemy.exc import IntegrityError
 
 from scraper0.core.dates import IST
 from scraper0.core.entities import EVENT_SPEC
-from scraper0.db.models import ActionVersion, SiteAction, SiteItem, WriteRecord, now
+from scraper0.db.models import ActionVersion, SiteAction, WriteRecord, now
 from scraper0.db.session import session_scope
 from scraper0.services import media
 from scraper0.services import sites as sites_svc
+from scraper0.services import items as items_svc
 from scraper0.services.items import batch_keys
 
 log = structlog.get_logger(__name__)
@@ -324,31 +325,12 @@ def store_items(site_id: str, name: str, version: int, job_id: str, events: list
 
 
 def _store(site_id, name, version, job_id, payload) -> dict:
-    counts = {"created": 0, "updated": 0, "unchanged": 0}
     with session_scope() as s:
         a = sites_svc.get_action(s, site_id, name)
         seq = (a.scrape_seq or 0) + 1
-        ids = [i for _, i, _, _ in payload]
-        existing = {}
-        for chunk in range(0, len(ids), 500):
-            existing.update({r.id: r for r in s.scalars(select(SiteItem).where(SiteItem.id.in_(ids[chunk:chunk + 500])))})
+        counts = items_svc.upsert_rows(s, payload, entity_key=EVENT_SPEC.key, site_id=site_id, action=name,
+                                       tenant_id=None, job_id=job_id, seq=seq)
         t = now()
-        for key, iid, h, data in payload:
-            it = existing.get(iid)
-            if it is None:
-                s.add(SiteItem(id=iid, site_id=site_id, action=name, item_key=key, data=data, content_hash=h,
-                               first_seen_at=t, last_seen_at=t, updated_at=t, seen_seq=seq, version=version,
-                               job_id=job_id))
-                counts["created"] += 1
-            else:
-                if it.content_hash != h:
-                    it.content_hash, it.updated_at = h, t
-                    counts["updated"] += 1
-                else:
-                    counts["unchanged"] += 1
-                if it.data != data:
-                    it.data = data
-                it.last_seen_at, it.seen_seq, it.version, it.job_id = t, seq, version, job_id
         a.scrape_seq, a.last_scraped_at, a.last_success_at = seq, t, t
         a.last_item_count, a.consecutive_failures, a.last_error = len(payload), 0, None
         if a.status == "broken":

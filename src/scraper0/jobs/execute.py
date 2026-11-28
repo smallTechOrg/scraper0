@@ -17,7 +17,7 @@ from scraper0.db.session import session_scope
 from scraper0.services import entities as entity_svc
 from scraper0.services.ai import AIClient
 from scraper0.services.connector_state import DBStateStore
-from scraper0.services.items import upsert_items
+from scraper0.services.items import store_run_items
 
 log = structlog.get_logger(__name__)
 
@@ -50,9 +50,9 @@ def run(job_id: str, tenant_id: str, kind: str, inp: dict, source_id: str | None
     ai = AIClient(tenant_id, job_id)
     try:
         if kind == "crawl":
-            out = _crawl(tenant_id, inp, source_id, rep, ai)
+            out = _crawl(job_id, tenant_id, inp, source_id, rep, ai)
         elif kind == "connector":
-            out = _connector(tenant_id, inp, source_id, rep, ai)
+            out = _connector(job_id, tenant_id, inp, source_id, rep, ai)
         elif kind == "ingest":
             out = _ingest(job_id, tenant_id, inp, source_id, rep, ai)
         elif kind in ("site_refresh", "site_learn", "site_write"):
@@ -69,7 +69,7 @@ def run(job_id: str, tenant_id: str, kind: str, inp: dict, source_id: str | None
 
 # ------------------------------------------------------------------ crawl
 
-def _crawl(tenant_id, inp, source_id, rep, ai) -> dict:
+def _crawl(job_id, tenant_id, inp, source_id, rep, ai) -> dict:
     try:
         spec = entity_svc.resolve(tenant_id, inp.get("entity", "event"))
     except ValueError as e:
@@ -109,13 +109,22 @@ def _crawl(tenant_id, inp, source_id, rep, ai) -> dict:
                                    "llm_calls": st.llm_calls, "recipes_learned": st.recipes_learned})
         stats["returned"] = len(items)
     rep(f"{len(items)} item(s) extracted", {"items": len(items)}, force=True)
-    stored = upsert_items(tenant_id, spec.key, items, source_id)
+    stored = store_run_items(tenant_id, spec.key, items, job_id, seeds=urls)
     return {"entity": spec.name, "items": items, "stats": stats, "stored": stored}
 
 
 # ------------------------------------------------------------------ connector
 
-def _connector(tenant_id, inp, source_id, rep, ai) -> dict:
+def _connector_site(connector: str) -> tuple[str, str] | None:
+    """The site + list action a connector's events belong to (from the seeded code actions)."""
+    from scraper0.services.sites import CODE_ACTIONS, site_id_of
+    for base, name, _kind, mode, _entity, conn, _conn_action in CODE_ACTIONS:
+        if conn == connector and mode == "list":
+            return site_id_of(base), name
+    return None
+
+
+def _connector(job_id, tenant_id, inp, source_id, rep, ai) -> dict:
     from scraper0.connectors.base import ConnectorContext, ConnectorError, get
     from scraper0.jobs.runner import decrypt_auth
     conn = get(inp["connector"])
@@ -133,7 +142,8 @@ def _connector(tenant_id, inp, source_id, rep, ai) -> dict:
     except LLMError as e:
         raise JobFailed(f"AI unavailable: {e}") from e
     if isinstance(data, dict) and isinstance(data.get("events"), list):
-        stored = upsert_items(tenant_id, EVENT_SPEC.key, data["events"], source_id)
+        stored = store_run_items(tenant_id, EVENT_SPEC.key, data["events"], job_id,
+                                 site=_connector_site(conn.name))
         rep(f"{len(data['events'])} event(s)", {"items": len(data["events"])}, force=True)
         return {"data": data, "stored": stored}
     return {"data": data}
@@ -169,6 +179,6 @@ def _ingest(job_id, tenant_id, inp, source_id, rep, ai) -> dict:
     events = dedupe(events)
     events.sort(key=lambda e: (e.start_time or "9999", e.name))
     items = [e.to_dict() for e in events]
-    stored = upsert_items(tenant_id, EVENT_SPEC.key, items, source_id)
+    stored = store_run_items(tenant_id, EVENT_SPEC.key, items, job_id, private=True)    # uploads stay private
     return {"entity": "event", "items": items, "report": report, "stored": stored,
             "needs_review": sum(1 for e in events if e.warnings)}

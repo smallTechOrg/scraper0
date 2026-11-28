@@ -278,11 +278,23 @@ def _entity_key(tenant_id: str, entity: str | None) -> str | None:
 
 
 @router.get("/items")
-def items(request: Request, entity: str | None = None, q: str | None = None, limit: int = 50, offset: int = 0):
+def items(request: Request, entity: str | None = None, q: str | None = None, site: str | None = None,
+          action: str | None = None, sort: str = "last_seen", limit: int = 50, offset: int = 0):
+    """Shared site items (whoever scraped them) plus this tenant's private items."""
     p = resolve(request)
+    if sort not in item_svc.SORTS:
+        raise APIError(422, "invalid_input", f"sort must be one of {', '.join(item_svc.SORTS)}")
     rows, total = item_svc.list_items(p.tenant_id, _entity_key(p.tenant_id, entity), q,
-                                      max(1, min(limit, 500)), max(0, offset))
+                                      max(1, min(limit, 500)), max(0, offset), site_id=site or None,
+                                      action=action or None, sort=sort)
     return {"data": rows, "total": total}
+
+
+@router.get("/items/sites")
+def item_sites(request: Request):
+    """Sites holding items this tenant can see, with counts (for filters)."""
+    p = resolve(request)
+    return {"data": item_svc.site_filter_options(p.tenant_id)}
 
 
 @router.get("/items/changes")

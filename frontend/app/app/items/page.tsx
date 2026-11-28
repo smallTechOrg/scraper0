@@ -2,7 +2,7 @@
 
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
-import { ItemsTable } from "@/components/items-table";
+import { StoredItemsTable } from "@/components/items-table";
 import {
   Button,
   Card,
@@ -16,8 +16,7 @@ import {
   Select,
 } from "@/components/ui";
 import { EntityOptions } from "@/components/job-forms";
-import { api } from "@/lib/api";
-import { formatDate, timeAgo } from "@/lib/format";
+import { api, type ItemSort } from "@/lib/api";
 import { useAsync } from "@/lib/hooks";
 
 const PAGE = 50;
@@ -70,30 +69,44 @@ curl "${origin}/v1/items/changes?entity=${e}&cursor=1842" \\
   );
 }
 
+const SORTS: { value: ItemSort; label: string }[] = [
+  { value: "last_seen", label: "Last seen" },
+  { value: "updated", label: "Last changed" },
+  { value: "first_seen", label: "First seen" },
+];
+
 function ItemsView() {
   const params = useSearchParams();
   const entities = useAsync(() => api.entities(), "entities");
+  const sites = useAsync(() => api.itemSites(), "item-sites");
   const [entity, setEntity] = useState(params.get("entity") ?? "");
+  const [site, setSite] = useState(params.get("site") ?? "");
+  const [sort, setSort] = useState<ItemSort>((params.get("sort") as ItemSort) || "last_seen");
   const [q, setQ] = useState("");
   const query = useDebounced(q.trim());
   // Offset resets whenever the filter changes.
-  const filterKey = `${entity}|${query}`;
+  const filterKey = `${entity}|${site}|${sort}|${query}`;
   const [page, setPage] = useState({ key: filterKey, offset: 0 });
   const offset = page.key === filterKey ? page.offset : 0;
   const setOffset = (o: number) => setPage({ key: filterKey, offset: o });
 
   const items = useAsync(
-    () => api.items({ entity: entity || undefined, q: query || undefined, limit: PAGE, offset }),
-    `${entity}|${query}|${offset}`,
+    () =>
+      api.items({ entity: entity || undefined, site: site || undefined, sort, q: query || undefined, limit: PAGE, offset }),
+    `${filterKey}|${offset}`,
   );
   const spec = entities.data?.find((e) => e.name === entity);
   const total = items.data?.total ?? 0;
   const from = total === 0 ? 0 : offset + 1;
   const to = Math.min(offset + PAGE, total);
+  const filtered = !!(query || entity || site);
 
   return (
     <>
-      <PageHeader title="Items" description="Every stored result, de-duplicated per entity. Updated in place when a page changes." />
+      <PageHeader
+        title="Items"
+        description="One store for everything scraped. Items belong to their site and are updated by every run that sees them, whoever starts it. Uploads stay private to your workspace."
+      />
       <div className="space-y-6">
         <Card>
           <div className="flex flex-wrap items-end gap-3 border-b border-border px-4 py-3 sm:px-5">
@@ -104,6 +117,31 @@ function ItemsView() {
               <Select id="entity-filter" className="h-9 w-44" value={entity} onChange={(e) => setEntity(e.target.value)}>
                 <option value="">All entities</option>
                 {entities.data && <EntityOptions entities={entities.data} />}
+              </Select>
+            </div>
+            <div>
+              <label htmlFor="site-filter" className="mb-1 block text-xs font-medium text-subtle">
+                Site
+              </label>
+              <Select id="site-filter" className="h-9 w-52" value={site} onChange={(e) => setSite(e.target.value)}>
+                <option value="">All sites</option>
+                {sites.data?.map((s) => (
+                  <option key={s.site_id} value={s.site_id}>
+                    {s.site_id} ({s.items})
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <div>
+              <label htmlFor="item-sort" className="mb-1 block text-xs font-medium text-subtle">
+                Sort by
+              </label>
+              <Select id="item-sort" className="h-9 w-40" value={sort} onChange={(e) => setSort(e.target.value as ItemSort)}>
+                {SORTS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
               </Select>
             </div>
             <div className="min-w-[12rem] flex-1">
@@ -125,27 +163,14 @@ function ItemsView() {
             isEmpty={(d) => d.items.length === 0}
             empty={
               <EmptyState
-                title={query || entity ? "No matching items" : "No items stored yet"}
-                description={query || entity ? "Try another search or entity." : "Successful jobs store their results here."}
+                title={filtered ? "No matching items" : "No items stored yet"}
+                description={filtered ? "Try another search, site or entity." : "Successful jobs and site reads store their results here."}
               />
             }
           >
             {(d) => (
               <>
-                <ItemsTable
-                  entity={entity || undefined}
-                  fieldOrder={spec?.fields.map((f) => f.name)}
-                  metaHeader="Changed"
-                  rows={d.items.map((it) => ({
-                    key: it.id,
-                    data: entity ? it.data : { ...it.data, entity: it.entity },
-                    meta: (
-                      <time dateTime={it.changed_at} title={`First seen ${formatDate(it.first_seen_at)} · last seen ${formatDate(it.last_seen_at)}`}>
-                        {timeAgo(it.changed_at)}
-                      </time>
-                    ),
-                  }))}
-                />
+                <StoredItemsTable items={d.items} entity={entity || undefined} fieldOrder={spec?.fields.map((f) => f.name)} />
                 <nav aria-label="Pagination" className="flex items-center justify-between gap-3 px-4 py-3 text-sm sm:px-5">
                   <p className="text-muted tabular-nums">
                     {from}–{to} of {total}

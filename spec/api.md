@@ -108,15 +108,27 @@ Source = {id, name, kind, config, interval_minutes, enabled, next_run_at, last_j
 
 ## Stored results and change feed
 
-Results from every successful crawl/ingest/FETCH_EVENTS job are upserted per (tenant, entity, item_key).
-`item_key` is the canonical link, or a content fingerprint when there is no link.
+There is one item store, shared through sites (migration `0004`):
+
+- **Site items** belong to a site + action (`fetch_events` for events, `fetch_<entity>` otherwise) and are shared by
+  every tenant. Every run that scrapes the site updates the same rows, whoever starts it: v2 refreshes, v1 crawl
+  jobs (site = the seed URL's host; a site seen for the first time is registered with no actions, which is not
+  onboarding) and connector jobs (the site of the connector's code action, e.g. TEAMEVEREST → `teameverest-ngo`).
+  Item `id` = `itm_` + sha256(site_id | action | item_key)[:24], the same id v2 reads return.
+- **Private items** (uploads and text ingest, and items of tenant-defined entities) are visible to their tenant only.
+- Each run bumps `last_seen_at` on every item it saw; `updated_at` moves only when the content changed (the image URL
+  is not content). No versions are kept.
 
 ```
-GET /v1/items?entity=event&q=&limit=50&offset=0           → {"data": [Item], "total"}
+GET /v1/items?entity=&site=&action=&q=&sort=last_seen|updated|first_seen&limit=50&offset=0  → {"data": [Item], "total"}
+GET /v1/items/sites                                       → {"data": [{site_id, items}]}   (sites holding visible items)
 GET /v1/items/changes?entity=event&cursor=0&limit=500     → {"data": [{change: created|updated, item: Item}], "next_cursor": int, "has_more": bool}
-Item = {id, entity, item_key, data, source_id, first_seen_at, last_seen_at, changed_at}
+Item = {id: "itm_…", entity, item_key, data, site_id, action, private, job_id, first_seen_at, last_seen_at,
+        updated_at, changed_at (= updated_at)}
 ```
-Consumers store `next_cursor` and pass it back as `cursor`, so they only ever see new or changed items.
+A tenant sees all site items plus its own private items, in both the list and the change feed. Consumers store
+`next_cursor` and pass it back as `cursor`, so they only ever see new or changed items. (`0004` restarted the feed:
+cursors from before it are not valid.) `source_id` is no longer on items; `job_id` is the last job that saw the item.
 
 ## Platform admin (session with is_platform_admin)
 

@@ -104,6 +104,21 @@ def get_action(site_id: str, name: str, request: Request):
         return {"data": sites_svc.action_public(_call(sites_svc.get_action, s, site_id, name))}
 
 
+@router.get("/sites/{site_id}/actions/{name}/items")
+def action_items(site_id: str, name: str, request: Request, q: str | None = None, sort: str = "last_seen",
+                 limit: int = 50, offset: int = 0):
+    """Everything stored for this site + action (shared items), whichever run scraped it."""
+    from scraper0.services import items as item_svc
+    _viewer(request)
+    with session_scope() as s:
+        _call(sites_svc.get_action, s, site_id, name)
+    if sort not in item_svc.SORTS:
+        raise APIError(422, "invalid_input", f"sort must be one of {', '.join(item_svc.SORTS)}")
+    rows, total = item_svc.list_items(None, None, q, max(1, min(limit, 500)), max(0, offset), site_id=site_id,
+                                      action=name, sort=sort, shared_only=True)
+    return {"data": rows, "total": total}
+
+
 def _learn(site_id: str, name: str, request: Request, response: Response):
     p = _admin(request)
     if p.tenant is None:

@@ -303,15 +303,44 @@ export interface SourceCreate {
   enabled?: boolean;
 }
 
+/**
+ * One stored item. Site items (site_id + action) are shared by every tenant and updated by whichever run
+ * scrapes that site; private items (uploads, tenant-defined entities) belong to one tenant.
+ */
 export interface Item {
   id: string;
   entity: string;
   item_key: string;
   data: Record<string, unknown>;
-  source_id: string | null;
+  site_id: string | null;
+  action: string | null;
+  private: boolean;
+  /** The last job that saw it. */
+  job_id: string | null;
   first_seen_at: ISODate;
+  /** Any run that saw it, changed or not. */
   last_seen_at: ISODate;
+  /** Its content last changed. */
+  updated_at: ISODate;
+  /** Same as updated_at (kept for older clients). */
   changed_at: ISODate;
+}
+
+export type ItemSort = "last_seen" | "updated" | "first_seen";
+
+export interface ItemQuery {
+  entity?: string;
+  q?: string;
+  site?: string;
+  action?: string;
+  sort?: ItemSort;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ItemSiteCount {
+  site_id: string;
+  items: number;
 }
 
 export interface AdminTenant extends Tenant {
@@ -745,10 +774,11 @@ export const api = {
   runSource: (id: string) => data<Job>(`/v1/sources/${enc(id)}/run`, { method: "POST" }),
 
   // Items
-  items: async (query: { entity?: string; q?: string; limit?: number; offset?: number }) => {
-    const res = await request<{ data: Item[]; total: number }>("/v1/items", { query });
+  items: async (query: ItemQuery) => {
+    const res = await request<{ data: Item[]; total: number }>("/v1/items", { query: { ...query } });
     return { items: res.data ?? [], total: res.total ?? 0 };
   },
+  itemSites: () => data<ItemSiteCount[]>("/v1/items/sites"),
 
   // Platform admin
   admin: {
@@ -815,6 +845,13 @@ export const sitesApi = {
   lock: (siteId: string, name: string, version: number) =>
     v2<ActionContract>(`${actionPath(siteId, name)}/versions/${enc(String(version))}/lock`, { method: "POST" }),
   contract: (siteId: string, name: string) => v2<ActionContract>(`${actionPath(siteId, name)}/contract`),
+
+  /** Everything stored for this site + action, whichever run (any tenant, v1 or v2) scraped it. */
+  items: async (siteId: string, name: string, query: Omit<ItemQuery, "entity" | "site" | "action"> = {}) => {
+    const res = await request<{ data: Item[]; total: number }>(`${actionPath(siteId, name)}/items`, { query: { ...query } })
+      .catch(friendlyV2);
+    return { items: res.data ?? [], total: res.total ?? 0 };
+  },
 
   read: (siteId: string, name: string, body: ReadRequest = {}) =>
     v2<ReadResult>(`${actionPath(siteId, name)}/read`, { method: "POST", body }),
