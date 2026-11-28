@@ -345,9 +345,10 @@ class Crawler:
             template = None
         opener = getattr(self.fetcher, "open_items", None)
         if template is None and opener is not None:
-            names = [str(i.get("name") or i.get("title") or "") for i in items[:3]]
+            names = [str(i.get("name") or i.get("title") or "") for i in items[:60]]
+            shown = [n for n in names if n and " ".join(n.split())[:28] in (rr.html or "")]     # only what the page shows
             try:
-                opened = opener(base, [n for n in names if n]) or []
+                opened = opener(base, (shown or [n for n in names if n])[:3]) or []
             except Exception as e:  # noqa: BLE001 - best effort
                 log.info("open_items_failed", seed=seed, error=str(e)[:200])
                 opened = []

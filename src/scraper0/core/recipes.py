@@ -300,7 +300,9 @@ def _find_url_node(soup: BeautifulSoup, url: str, page_url: str) -> tuple[Tag, s
 def _is_label(ctx: str) -> bool:
     """'Venue:' / 'Date -' / '| IST' are labels; '7:00 am' or prose are other values."""
     c = ctx.strip()
-    return len(c) <= 30 and not re.search(r"\d", c)
+    if len(c) > 30 or re.search(r"\d", c):
+        return False
+    return len(c.split()) <= 3 or c[-1:] in ":-–|" or c[:1] in ":-–|("        # not the rest of a sentence
 
 
 def _rule_for(soup: BeautifulSoup, el: Tag, attr: str, snippet: str) -> list[dict]:
@@ -364,6 +366,24 @@ def _find_value_node(soup: BeautifulSoup, value: str) -> Tag | None:
         if SequenceMatcher(None, t, want).ratio() >= 0.9:
             best, best_len = el, len(t)
     return best
+
+
+_TITLE_SEP = r"|–—·:»"
+
+
+def _title_rules(soup: BeautifulSoup, want: str) -> list[dict]:
+    """A short value that is one part of the page <title> ("In Person Volunteering | Team Everest"): its last
+    or first part, as a rule on the title."""
+    title = norm(soup.title.get_text()) if soup.title else ""
+    parts = [p.strip() for p in re.split(rf"\s[{_TITLE_SEP}-]\s|[{_TITLE_SEP}]", title) if p.strip()]
+    if len(parts) < 2 or len(want) > 80:
+        return []
+    out = []
+    if SequenceMatcher(None, parts[-1].lower(), want.lower()).ratio() >= 0.9:
+        out.append({"sel": "title", "attr": "text", "re": rf"(?:\s[{_TITLE_SEP}-]\s|[{_TITLE_SEP}])\s*([^{_TITLE_SEP}]+?)\s*$"})
+    if SequenceMatcher(None, parts[0].lower(), want.lower()).ratio() >= 0.9:
+        out.append({"sel": "title", "attr": "text", "re": rf"^\s*(.+?)\s*(?:\s[{_TITLE_SEP}-]\s|[{_TITLE_SEP}])"})
+    return out
 
 
 def _decodings(raw: str):
@@ -549,6 +569,8 @@ def learn_recipe(html: str, page_url: str, spec: EntitySpec, item: dict, sources
         if not verified and f.type in ("text", "address"):       # the AI quoted a part; the element holds it all
             el = _find_value_node(soup, str(want))
             verified = [r for r in (_rule_for(soup, el, "text", "") if el is not None else []) if ok(r)]
+        if not verified and f.type == "text":                    # "Page name | Site name": a part of the <title>
+            verified = [r for r in _title_rules(soup, str(want)) if ok(r)]
         if not verified:                                         # not visible text: attributes, meta, inline JSON
             verified = [r for r in _hidden_rules(soup, spec, fname, want, page_url) if ok(r)][:4]
         if verified:
@@ -580,7 +602,7 @@ def _keyed(rule: dict) -> bool:
     if "parts" in rule:
         return all(_keyed(r) for r in rule["parts"])
     sel = rule.get("sel", "")
-    return "[" in sel or sel.startswith("#")
+    return " > " not in sel and ":nth-" not in sel and ("[" in sel or sel.startswith("#") or sel == "title")
 
 
 def share_rules(layouts: list[dict]) -> list[dict]:

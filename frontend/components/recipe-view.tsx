@@ -31,6 +31,7 @@ export interface PlanStep {
   over?: string;
   max?: number;
   optional?: boolean;
+  missing?: string[];
   fallback_only?: boolean;
   uses_ai?: boolean;
   fields?: string[];
@@ -50,6 +51,7 @@ export interface Plan {
   link_template?: string;
   link_base?: string;
   learned_by?: string;
+  placeholders?: Record<string, string[]>;
 }
 
 export interface Snapshot {
@@ -76,6 +78,8 @@ export interface RunStats {
   retries?: Record<string, number>;
   expect_failures?: Array<{ step: string; reason: string }>;
   outcomes?: Record<string, string>;
+  truncated?: Array<{ step: string; cap: string; items: number; total?: number | null }>;
+  paging?: Record<string, { unique: number; total?: number | null; sweeps: number }>;
 }
 
 export function hasRecipe(snapshot: Record<string, unknown> | null | undefined): boolean {
@@ -156,7 +160,7 @@ function paginateText(pg: Dict): string {
   const stops: string[] = [];
   if (stop.fewer_than) stops.push(`a page has < ${stop.fewer_than} items`);
   if (stop.total_path) stops.push(`${stop.total_path} reached`);
-  stops.push(`${pg.max_pages ?? 25} pages at most`);
+  stops.push(pg.max_pages ? `${pg.max_pages} pages at most` : "a page is empty");
   return `${parts.join(" ")} · stops when ${stops.join(", or ")}`;
 }
 
@@ -212,7 +216,7 @@ function StepCard({ step, index, alt }: { step: PlanStep; index?: number; alt?: 
             </pre>
           </Row>
         )}
-        {step.paginate && <Row label="Paging">{paginateText(step.paginate)}{step.paginate.unstable_order ? " · order not stable between calls" : ""}</Row>}
+        {step.paginate && <Row label="Paging">{paginateText(step.paginate)}{step.paginate.unstable_order ? " · order not stable between calls: swept again until every item was seen" : ""}</Row>}
         {step.items && (
           <Row label="Items">
             {"json" in step.items ? (
@@ -228,6 +232,7 @@ function StepCard({ step, index, alt }: { step: PlanStep; index?: number; alt?: 
         {step.type === "for_each" && (
           <Row label="Over">
             <Mono>{step.over}</Mono> · at most {step.max ?? 120}
+            {(step.missing ?? []).length > 0 && ` · only items without ${(step.missing ?? []).join(", ")}`}
           </Row>
         )}
         {step.extract && (
@@ -299,7 +304,12 @@ function mappingSource(v: Json): ReactNode {
   if (v && typeof v === "object") {
     const d = v as Dict;
     if (typeof d.template === "string") return <Mono><Templated text={d.template} /></Mono>;
-    if (Array.isArray(d.first_of)) return <Mono>first of {(d.first_of as string[]).join(", ")}</Mono>;
+    if (Array.isArray(d.first_of)) {
+      const names = (d.first_of as Json[]).map((m) =>
+        typeof m === "string" ? m : typeof (m as Dict)?.template === "string" ? String((m as Dict).template) : JSON.stringify(m),
+      );
+      return <Mono>first of {names.join(", ")}</Mono>;
+    }
   }
   return <Mono>{JSON.stringify(v)}</Mono>;
 }
@@ -383,6 +393,11 @@ function PlanCard({ seed, plan }: { seed: string; plan: Plan }) {
               </Mono>
             </Row>
           )}
+          {Object.entries(plan.placeholders ?? {}).map(([field, urls]) => (
+            <Row key={field} label="Stand-ins">
+              {field}: treated as none when it is <Mono>{urls.join(", ")}</Mono>
+            </Row>
+          ))}
         </>
       )}
     </div>
@@ -428,7 +443,7 @@ export function PlanRuns({ runs, title = "How the recipe ran" }: { runs: RunStat
       {runs.map((r, i) => {
         const fragile =
           r.entry === "navigate" || Object.keys(r.alternatives ?? {}).length > 0 || Object.keys(r.retries ?? {}).length > 0 ||
-          (r.expect_failures ?? []).length > 0;
+          (r.expect_failures ?? []).length > 0 || (r.truncated ?? []).length > 0;
         return (
           <div key={i} className="space-y-1 rounded-md border border-border p-3 text-xs">
             <div className="flex flex-wrap items-center gap-2">
@@ -453,6 +468,17 @@ export function PlanRuns({ runs, title = "How the recipe ran" }: { runs: RunStat
             {Object.entries(r.retries ?? {}).map(([k, v]) => (
               <Row key={k} label="Retries">
                 <Mono>{k}</Mono>: {v}
+              </Row>
+            ))}
+            {(r.truncated ?? []).map((t, j) => (
+              <Row key={`t${j}`} label="Cut short">
+                <Mono>{t.step}</Mono>: stopped by the {t.cap.replace("max_", "")} cap at {t.items} item(s)
+                {t.total ? ` of ${t.total}` : ""}
+              </Row>
+            ))}
+            {Object.entries(r.paging ?? {}).map(([k, v]) => (
+              <Row key={`p${k}`} label="Unstable order">
+                <Mono>{k}</Mono>: {v.unique} unique item(s){v.total ? ` of ${v.total}` : ""} after {v.sweeps} pass(es)
               </Row>
             ))}
             {(r.expect_failures ?? []).map((f, j) => (

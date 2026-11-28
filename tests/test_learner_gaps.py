@@ -121,6 +121,20 @@ def test_summarised_text_is_located_by_its_quote_and_layouts_share_keyed_rules()
                           {"path_pattern": "/v/*", "rules": {"name": [{"sel": "h1.t", "attr": "text"}]}}])
     assert shared[1]["rules"]["description"] == [{"sel": 'div[data-slot="about"]', "attr": "text"}]
     assert "start_time" not in shared[1]["rules"]             # time.d names nothing: positional rules are not shared
+    pos = {"path_pattern": "/p/*", "rules": {"address": [{"sel": "#main > div.row:nth-of-type(5) > p", "attr": "text"}]}}
+    assert "address" not in share_rules([pos, {"path_pattern": "/q/*", "rules": {}}])[1]["rules"]   # nor a path under an id
+
+
+def test_site_name_in_the_title_serves_as_the_organiser():
+    html = """<html><head><title>In Person Volunteering | Team Everest</title></head><body><h1 class="t">Make Puzzles</h1>
+        <time class="d">2099-06-01 09:00</time><p>Join us to make puzzle kits for students. Everyone is welcome to help.</p>
+        <footer><p>All rights reserved by the Team Everest trust and its partners</p></footer></body></html>"""
+    rules = learn_recipe(html, "https://t.x/e/1", EVENT_SPEC,
+                         {"name": "Make Puzzles", "start_time": "2099-06-01T03:30:00.000Z", "organisation": "Team Everest"},
+                         {"name": "Make Puzzles", "start_time": "2099-06-01 09:00", "organisation": "Team Everest"})
+    assert rules["organisation"][0]["sel"] == "title"
+    other = html.replace("In Person Volunteering", "Virtual: Calendar - Making").replace("Make Puzzles", "Desk Calendar")
+    assert apply_recipe(rules, other, "https://t.x/e/2", EVENT_SPEC)[0]["organisation"] == "Team Everest"
 
 
 class BuilderSite:
