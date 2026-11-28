@@ -56,3 +56,24 @@ cd frontend && npx tsc --noEmit && npm run lint && npm run build
 
 `playwright install chromium` may remove older Chromium builds from `~/Library/Caches/ms-playwright`, which other
 repos on the same machine may need.
+
+
+## Learner gaps closed (2026-11-28)
+
+After the first learned-vs-connector comparison, these generic mechanisms were added (`spec/recipes.md` has the
+detail; `tests/test_learner_gaps.py` has an offline fake site for each):
+
+- **Values beyond visible text:** rules read attributes, meta tags, encoded values and inline JSON (`decode`).
+- **Templates, not URL patterns:** rules are shared across URL patterns of one template; the AI budget is per
+  template and pattern; detail pages go to the AI one at a time.
+- **Why learning cost 30 AI calls before:** a static site was rendered page by page once one page had been
+  rendered, and every rendered page asked the AI to map its analytics calls. Both are fixed.
+- **Paging:** stops at the API's total; caps are settings and reported when hit; page size is raised; unstable
+  order gets a confirmed tiebreaker or is swept.
+- **Links:** the item's own URL key, script URLs, or click-and-see in the browser, verified by a GET.
+- **Listing discovery:** a thin seed gives way to the site's listing page.
+- **Placeholder images** count as no image.
+- **AI answers:** unbalanced JSON is repaired; site chrome (logos, header images) is not offered as a picture.
+
+Not covered: values that exist only after a script computes them (a derived end time), and sites whose listing
+has no link that names it.
