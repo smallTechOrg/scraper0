@@ -69,6 +69,10 @@ class Settings(BaseSettings):
 
     # --- BBMP complaint attachments (downloaded from media_url)
     max_upload_mb: int = 40
+    # Safety caps for one run of a recipe plan (core/plans.py). Paging normally ends at the API's reported total.
+    plan_max_requests: int = Field(300, ge=1, le=5000)
+    plan_max_pages: int = Field(200, ge=1, le=2000)
+    plan_max_items: int = Field(5000, ge=1, le=100000)
 
     @property
     def is_sqlite(self) -> bool:

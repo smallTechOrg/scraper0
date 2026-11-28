@@ -42,6 +42,9 @@ class RenderResult:
     final_url: str
     json_responses: list[tuple[str, str]] = field(default_factory=list)   # (url, body) for GET xhr/fetch JSON
     requests: list[CapturedRequest] = field(default_factory=list)         # every xhr/fetch, any method/host
+    # render(click_texts=[...]): where clicking the element showing each text led — learning item links that
+    # are not anchors. [{"text", "url", "canonical"}], only for clicks that changed the URL.
+    opened: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -97,13 +100,15 @@ class Renderer:
         self.unavailable: str | None = None     # set when Chromium/Playwright can't start
 
     # ---------------------------------------------------------------- public
-    def render(self, url: str, timeout_s: float = 75) -> RenderResult | None:
-        """Never raises. None when rendering is unavailable, blocked or failed."""
+    def render(self, url: str, timeout_s: float = 75, click_texts: list[str] | None = None) -> RenderResult | None:
+        """Never raises. None when rendering is unavailable, blocked or failed. With `click_texts`, the element
+        showing each text is clicked in turn and the page it opens is recorded in `opened` (learning only)."""
         if self.unavailable or not is_public_url(url):
             return None
         box: dict = {}
         done = threading.Event()
-        self._q.put((url, box, done))
+        self._q.put((url, box, done, list(click_texts or [])[:4]))
+        timeout_s += 15 * len(click_texts or [])
         self._ensure_thread()
         if not done.wait(timeout_s):
             log.warning("render_timeout", url=url)
@@ -133,11 +138,11 @@ class Renderer:
                 try:
                     while True:
                         try:
-                            url, box, done = self._q.get(timeout=IDLE_SHUTDOWN_S)
+                            url, box, done, clicks = self._q.get(timeout=IDLE_SHUTDOWN_S)
                         except queue.Empty:
                             return
                         try:
-                            box["result"] = self._render_one(browser, url)
+                            box["result"] = self._render_one(browser, url, clicks)
                         except Exception as e:  # noqa: BLE001
                             log.warning("render_failed", url=url, error=str(e)[:300])
                         finally:
@@ -152,7 +157,7 @@ class Renderer:
         log.warning("renderer_unavailable", reason=reason)
         while True:
             try:
-                _, _, done = self._q.get_nowait()
+                done = self._q.get_nowait()[2]
                 done.set()
             except queue.Empty:
                 return
@@ -163,7 +168,47 @@ class Renderer:
             self._host_ok[host] = is_public_url(url)     # SSRF guard for every sub-request, cached per host
         return self._host_ok[host]
 
-    def _render_one(self, browser, url: str) -> RenderResult:
+    def _open_by_click(self, ctx, page, url: str, texts: list[str]) -> list[dict]:
+        """Click the element showing each text; where the browser ends up is that item's page."""
+        opened = []
+        for text in texts:
+            probe = " ".join(text.split())[:28].strip()
+            if len(probe) < 4:
+                continue
+            try:
+                loc = page.get_by_text(probe, exact=False).first
+                loc.scroll_into_view_if_needed(timeout=2000)
+                before, pages_before = page.url, len(ctx.pages)
+                loc.click(timeout=3000)
+                try:
+                    page.wait_for_url(lambda u: u != before, timeout=4000)
+                except Exception:  # noqa: BLE001 — a new tab, or a click that does not navigate
+                    pass
+                target = ctx.pages[-1] if len(ctx.pages) > pages_before else page
+                try:
+                    target.wait_for_load_state("domcontentloaded", timeout=5000)
+                except Exception:  # noqa: BLE001
+                    pass
+                after = target.url
+                if after and after != before and self._allowed(after):
+                    canonical = target.evaluate(
+                        "() => (document.querySelector('link[rel=canonical]') || {}).href || "
+                        "(document.querySelector('meta[property=\"og:url\"]') || {}).content || ''")
+                    opened.append({"text": text, "url": after, "canonical": canonical or ""})
+                if target is not page:
+                    target.close()
+                elif page.url != before:
+                    page.goto(url, wait_until="networkidle", timeout=NAV_TIMEOUT_MS)
+            except Exception as e:  # noqa: BLE001 — best effort: a link that can't be found stays unknown
+                log.info("render_click_failed", url=url, text=probe, error=str(e)[:120])
+                try:
+                    if page.url != url:
+                        page.goto(url, wait_until="networkidle", timeout=NAV_TIMEOUT_MS)
+                except Exception:  # noqa: BLE001
+                    break
+        return opened
+
+    def _render_one(self, browser, url: str, clicks: list[str] | None = None) -> RenderResult:
         t0 = time.monotonic()
         ctx = browser.new_context(viewport={"width": 1280, "height": 2000}, locale="en-IN", timezone_id="Asia/Kolkata")
         captured: list[tuple[str, str]] = []
@@ -221,11 +266,12 @@ class Renderer:
                 pass
             html = page.content()
             final = page.url
+            opened = self._open_by_click(ctx, page, final, clicks) if clicks else []
         finally:
             ctx.close()
         log.info("rendered", url=url, ms=int((time.monotonic() - t0) * 1000), html_chars=len(html), json=len(captured),
                  calls=len(calls))
-        return RenderResult(html=html, final_url=final, json_responses=captured, requests=calls)
+        return RenderResult(html=html, final_url=final, json_responses=captured, requests=calls, opened=opened)
 
 
 _shared: Renderer | None = None

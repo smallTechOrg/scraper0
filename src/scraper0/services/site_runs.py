@@ -132,7 +132,7 @@ def learn_plans(seeds: list[str], portal: str, rep, ai) -> dict:
     the API plan when the page loads its data from one, else list page → detail pages with the layout rules
     worked out during this learn. Every plan is then run cold (no browser, no AI) and must produce items."""
     from scraper0.core import plans
-    from scraper0.core.recipes import domain_of, path_pattern
+    from scraper0.core.recipes import domain_of, path_pattern, share_rules
     from scraper0.events.engine import Engine, Options
     fetcher = _fetcher()
     eng = Engine(fetcher, llm=ai.text_fn("extract"), filter_llm=ai.text_fn("filter"))
@@ -146,16 +146,26 @@ def learn_plans(seeds: list[str], portal: str, rep, ai) -> dict:
             by_method[k] = by_method.get(k, 0) + n
         notes += stats.get("notes") or []
         plan = stats.get("plan")
+        entry = stats.get("entry") or seed      # the listing page the learner settled on (the seed, unless thin)
+        if entry != seed:
+            notes.append(f"{seed}: the fuller listing is {entry}")
         if plan is None:
             pats = sorted({path_pattern(e.get("source_url") or e.get("link")) for e in events
                            if (e.get("source_url") or e.get("link")) and
-                           domain_of(e.get("source_url") or e.get("link")) == domain_of(seed)} - {path_pattern(seed)})
+                           domain_of(e.get("source_url") or e.get("link")) == domain_of(seed)} - {path_pattern(entry)})
             if not pats:
                 notes.append(f"{seed}: no detail pages with items were found")
                 continue
-            layouts = [r for r in eng.store.recipes_for(domain_of(seed), EVENT_SPEC.key) if r["strategy"] == "selectors"]
-            plan = plans.from_selectors(layouts, seed, patterns=pats,
-                                        navigate=plans.learn_navigate(fetcher, seed))
+            layouts = share_rules([r for r in eng.store.recipes_for(domain_of(seed), EVENT_SPEC.key)
+                                   if r["strategy"] == "selectors"])
+            plan = plans.from_selectors(layouts, entry, patterns=pats,
+                                        navigate=plans.learn_navigate(fetcher, entry))
+        elif entry != seed and "entry" not in plan:
+            # an API plan calls the API directly; the entry records where a person finds this list on the site
+            plan["entry"] = {"direct": entry, "root": plans._root(entry)}
+            nav = plans.learn_navigate(fetcher, entry)
+            if nav:
+                plan["entry"]["navigate"] = nav
         out.append({"seed": seed, "plan": plan})
     if not out:
         raise ScrapeFailed("nothing could be learned: " + ("; ".join(notes)[:400] or "no items found"))

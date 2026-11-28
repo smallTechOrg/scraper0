@@ -55,10 +55,24 @@ DEFAULT_RETRY = {"attempts": 2, "backoff_s": 1.0}
 WHEN_OPS = {"exists", "missing", "equals", "not_equals", "in"}
 PAGINATE_MODES = {"offset", "page", "cursor", "next_link"}
 
-MAX_REQUESTS = 250        # per plan run
-MAX_PAGES = 25            # per paginated step
-MAX_ITEMS = 2000          # per step
+# Safety caps. Paging normally stops by itself (the API's reported total, a short or empty page); the caps only
+# bound a run that would otherwise not end, and a run that hits one says so in RunStats.truncated.
+# Settings: SCRAPER0_PLAN_MAX_REQUESTS / _PLAN_MAX_PAGES / _PLAN_MAX_ITEMS.
+MAX_REQUESTS = 300        # per plan run
+MAX_PAGES = 200           # per paginated step
+MAX_ITEMS = 5000          # per step
 MAX_FOR_EACH = 120        # detail requests per for_each step
+MAX_SWEEPS = 3            # passes over a paged list whose order is unstable (paginate.unstable_order)
+
+
+def caps() -> tuple[int, int, int]:
+    """(max requests per run, max pages per step, max items per step), from settings when available."""
+    try:
+        from scraper0.config import get_settings
+        st = get_settings()
+        return st.plan_max_requests, st.plan_max_pages, st.plan_max_items
+    except Exception:  # noqa: BLE001 - the runner also works without app settings
+        return MAX_REQUESTS, MAX_PAGES, MAX_ITEMS
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][\w.\-]*)\}")
 
 
@@ -274,6 +288,8 @@ class RunStats:
     retries: dict = field(default_factory=dict)        # step id → retries used
     expect_failures: list = field(default_factory=list)
     outcomes: dict = field(default_factory=dict)       # step id → ok | failed | skipped | fallback
+    truncated: list = field(default_factory=list)      # [{"step", "cap", "items", "total"}] when a safety cap ended paging
+    paging: dict = field(default_factory=dict)         # step id → {"unique", "total", "sweeps"} for unstable-order lists
     log: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -281,7 +297,8 @@ class RunStats:
                 "detail_failures": self.detail_failures, "ai_calls": self.ai_calls, "ai_tokens": self.ai_tokens,
                 "ai_by_step": self.ai, "entry": self.entry, "entry_changed_to": self.entry_changed_to,
                 "alternatives": self.alternatives, "retries": self.retries,
-                "expect_failures": self.expect_failures, "outcomes": self.outcomes}
+                "expect_failures": self.expect_failures, "outcomes": self.outcomes,
+                "truncated": self.truncated, "paging": self.paging}
 
 
 @dataclass
@@ -313,8 +330,8 @@ class Runner:
 
     # -------------------------------------------------------------- one request
     def _send(self, req: dict, ctx: dict):
-        if self.stats.requests >= MAX_REQUESTS:
-            raise PlanError(f"request cap reached ({MAX_REQUESTS})")
+        if self.stats.requests >= caps()[0]:
+            raise PlanError(f"request cap reached ({caps()[0]})")
         url = render(req["url"], ctx)
         query = render(req.get("query") or {}, ctx)
         if query:
@@ -412,71 +429,117 @@ class Runner:
             self.stats.pages += 1
             self._capture(step, res, ctx)
             got, _ = self._items(step, url, res)
-            return got[:MAX_ITEMS]
+            return got[:caps()[2]]
         mode = pg["mode"]
-        max_pages = min(int(pg.get("max_pages") or MAX_PAGES), MAX_PAGES)
+        max_requests, cap_pages, max_items = caps()
+        max_pages = min(int(pg.get("max_pages") or cap_pages), cap_pages)
         stop = pg.get("stop") or {}
-        value = pg.get("start", 0 if mode == "offset" else 1)
         step_by = int(pg.get("step") or 1)
         as_str = pg.get("type") == "str"
-        next_url = None
-        prev_keys: set | None = None
-        for n in range(max_pages):
-            if mode == "next_link":
-                req = dict(step, url=next_url) if next_url else step
-            else:
-                ctx["page"] = {"value": str(value) if as_str and value is not None else value, "number": n + 1}
-                req = step
-            try:
-                url, res = self._send(req, ctx)
-            except MissingValue:
-                if mode == "cursor" and n > 0:
-                    break
-                raise
-            except PlanError:
-                if n == 0:
+        seen: set[str] = set()
+        total = None
+        # An API that sorts on ties hands out a different subset per page each time, so one pass can miss items.
+        # Such lists (flagged while learning) are swept again until every item was seen, or a sweep adds nothing.
+        sweeps = MAX_SWEEPS if pg.get("unstable_order") else 1
+        used = 0
+        for sweep in range(sweeps):
+            used = sweep + 1
+            before = len(out)
+            value = pg.get("start", 0 if mode == "offset" else 1)
+            next_url = None
+            prev_keys: set | None = None
+            fetched = 0
+            for n in range(max_pages):
+                if mode == "next_link":
+                    req = dict(step, url=next_url) if next_url else step
+                else:
+                    ctx["page"] = {"value": str(value) if as_str and value is not None else value, "number": n + 1}
+                    req = step
+                try:
+                    url, res = self._send(req, ctx)
+                except MissingValue:
+                    if mode == "cursor" and n > 0:
+                        break
                     raise
-                log.info("plan_page_failed", step=step["id"], page=n + 1)
-                break
-            if n == 0:
-                self._capture(step, res, ctx)
-            got, data = self._items(step, url, res)
-            keys = {json.dumps(r.raw, sort_keys=True, default=str)[:400] for r in got}
-            if not got or (prev_keys is not None and keys == prev_keys):     # empty, or the param was ignored
-                break
-            self.stats.pages += 1
-            prev_keys = keys
-            out += got
-            if self.progress:
-                self.progress(f"{step['id']}: page {n + 1} → {len(got)} item(s)", {"pages": self.stats.pages})
-            if len(out) >= MAX_ITEMS:
-                break
-            if stop.get("fewer_than") and len(got) < int(stop["fewer_than"]):
-                break
-            if stop.get("total_path") and isinstance(data, (dict, list)):
-                total = lookup_path(data, stop["total_path"])
-                if isinstance(total, (int, float, str)) and str(total).isdigit() and len(out) >= int(total):
+                except PlanError:
+                    if n == 0 and sweep == 0:
+                        raise
+                    if self.stats.requests >= max_requests:
+                        self._truncated(step, "max_requests", len(out), total)
+                    log.info("plan_page_failed", step=step["id"], page=n + 1)
                     break
-            if mode == "offset":
-                value = int(value) + (step_by if pg.get("step") else len(got))
-            elif mode == "page":
-                value = int(value) + 1
-            elif mode == "cursor":
-                cur = lookup_path(data, pg["cursor_path"]) if isinstance(data, (dict, list)) else None
-                if cur in (None, ""):
+                if n == 0 and sweep == 0:
+                    self._capture(step, res, ctx)
+                got, data = self._items(step, url, res)
+                keys = {json.dumps(r.raw, sort_keys=True, default=str)[:400] for r in got}
+                if not got or (prev_keys is not None and keys == prev_keys):     # empty, or the param was ignored
                     break
-                value = cur
-            elif mode == "next_link":
-                from scraper0.core.discovery import next_page
-                next_url = next_page(res.text, url)
-                if not next_url:
+                if sweep == 0:
+                    self.stats.pages += 1
+                prev_keys = keys
+                fetched += len(got)
+                for r in got:                                  # a page can repeat items of an earlier one
+                    k = json.dumps(r.raw, sort_keys=True, default=str)
+                    if k not in seen:
+                        seen.add(k)
+                        out.append(r)
+                if self.progress:
+                    self.progress(f"{step['id']}: page {n + 1} → {len(got)} item(s)", {"pages": self.stats.pages})
+                if len(out) >= max_items:
+                    self._truncated(step, "max_items", len(out), total)
                     break
-        return out[:MAX_ITEMS]
+                if stop.get("fewer_than") and len(got) < int(stop["fewer_than"]):
+                    break
+                if stop.get("total_path") and isinstance(data, (dict, list)):
+                    t = lookup_path(data, stop["total_path"])
+                    if isinstance(t, (int, float, str)) and str(t).isdigit():
+                        total = int(t)
+                        if fetched >= total:
+                            break
+                if n + 1 == max_pages:
+                    self._truncated(step, "max_pages", len(out), total)
+                if mode == "offset":
+                    value = int(value) + (step_by if pg.get("step") else len(got))
+                elif mode == "page":
+                    value = int(value) + 1
+                elif mode == "cursor":
+                    cur = lookup_path(data, pg["cursor_path"]) if isinstance(data, (dict, list)) else None
+                    if cur in (None, ""):
+                        break
+                    value = cur
+                elif mode == "next_link":
+                    from scraper0.core.discovery import next_page
+                    next_url = next_page(res.text, url)
+                    if not next_url:
+                        break
+            if sweeps > 1 and (total is None or len(out) >= total or (sweep > 0 and len(out) == before)
+                               or len(out) >= max_items):
+                break
+        if pg.get("unstable_order"):
+            self.stats.paging[step["id"]] = {"unique": len(out), "total": total, "sweeps": used}
+        return out[:max_items]
+
+    def _truncated(self, step: dict, cap: str, items: int, total) -> None:
+        if not any(t["step"] == step["id"] and t["cap"] == cap for t in self.stats.truncated):
+            self.stats.truncated.append({"step": step["id"], "cap": cap, "items": items, "total": total})
+            log.warning("plan_truncated", step=step["id"], cap=cap, items=items, total=total)
 
     def _run_for_each(self, step: dict, ctx: dict, records: list[Record]) -> None:
         cap = min(int(step.get("max") or MAX_FOR_EACH), MAX_FOR_EACH)
         ext = step.get("extract") or {}
         keep: list[Record] = []
+        need = step.get("missing")             # only records lacking one of these fields are fetched
+        if need:
+            todo = [r for r in records if not self._has_fields(r, need)][:cap]
+            for rec in todo:
+                try:
+                    url, res = self._send(step["request"], dict(ctx, item=rec.raw))
+                except PlanError:
+                    self.stats.detail_failures += 1
+                    continue
+                got = self._extract_html(ext, res.text, url)
+                rec.fields.update({k: v for k, v in got.items() if k in need and v not in (None, "")})
+            return
         for rec in records[:cap]:
             ictx = dict(ctx, item=rec.raw)
             try:
@@ -504,6 +567,12 @@ class Runner:
             if self.progress and len(keep) % 10 == 0:
                 self.progress(f"{step['id']}: {len(keep)} page(s) read", {"pages": self.stats.pages})
         records[:] = keep + (records[cap:] if step.get("optional") else [])
+
+    def _has_fields(self, rec: Record, names: list[str]) -> bool:
+        ents = self._entities(self._plan, self._spec, [rec], {}, self._seed, validate_items=False)
+        stand_ins = self._plan.get("placeholders") or {}          # a known stand-in image counts as no image
+        return bool(ents) and all(ents[0].get(f) not in (None, "") and ents[0].get(f) not in (stand_ins.get(f) or [])
+                                  for f in names)
 
     def _extract_html(self, ext: dict, html: str, url: str) -> dict:
         from scraper0.core.recipes import apply_recipe, pattern_matches
@@ -601,7 +670,8 @@ class Runner:
         if failed is not None:
             raise failed
         self.stats.items = len(records)
-        return self._entities(plan, spec, records, tables, seed)
+        from scraper0.core.json_extract import drop_placeholder_images
+        return drop_placeholder_images(self._entities(plan, spec, records, tables, seed), plan.get("placeholders"))
 
     def _run_steps(self, plan: dict, ctx: dict) -> tuple[list[Record], dict]:
         steps = plan["steps"]

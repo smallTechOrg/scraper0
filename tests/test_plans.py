@@ -348,7 +348,8 @@ def test_learns_post_json_search_api_with_paging_date_and_image_prefix():
     assert len(items) == 30 and items[0]["image"].startswith("https://cdn.mb.x/events/")
     f.calls.clear()
     again, run_ = plans.run_plan(plan, f, EVENT_SPEC, "https://mb.x/")
-    assert len(again) == 30 and run_.pages == 3 and run_.ai_calls == 0      # cold run: no browser, no AI
+    assert st["body"]["json"]["limit"] == 100 and st["paginate"]["stop"]["fewer_than"] == 100   # the API allows bigger pages
+    assert len(again) == 30 and run_.pages == 1 and run_.ai_calls == 0      # cold run: no browser, no AI
 
 
 def test_learns_form_encoded_offset_api():

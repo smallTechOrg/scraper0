@@ -36,6 +36,9 @@ class EntitySpec:
     tenant_id: str | None = None      # None = built-in (learned layouts shared by all tenants)
     # optional enrichment fields: filled when a structured source (JSON API) has them, never asked of the LLM
     extra_fields: list[FieldSpec] = field(default_factory=list)
+    # other words sites use for this entity's listing ("activities", "opportunities"): used while learning to
+    # find the listing page from a home page, and to recognise a URL that already is one
+    synonyms: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         self.fields = [f if isinstance(f, FieldSpec) else FieldSpec(**f) for f in self.fields]
@@ -71,6 +74,7 @@ class EntitySpec:
         d = asdict(self)
         d.pop("tenant_id", None)
         d.pop("extra_fields", None)
+        d.pop("synonyms", None)
         d["builtin"] = self.tenant_id is None
         return d
 
@@ -137,6 +141,8 @@ EVENT_SPEC = EntitySpec(
     extra_fields=[
         FieldSpec("latitude", "number"), FieldSpec("longitude", "number"), FieldSpec("is_online", "bool"),
     ],
+    synonyms=["activity", "opportunity", "program", "programme", "workshop", "drive", "volunteer", "volunteering",
+              "meetup", "calendar", "happening", "whats on"],
 )
 
 BUILTIN_SPECS = {EVENT_SPEC.name: EVENT_SPEC}

@@ -64,10 +64,16 @@ class Fetcher:
         if self.renderer is None or not is_public_url(url) or not self.allowed(url):
             return None
         self._wait(url)
-        res = self.renderer.render(url)
-        if res is not None:
-            self.render_hosts.add(urlsplit(url).netloc)
-        return res
+        return self.renderer.render(url)
+
+    def open_items(self, url: str, texts: list[str]) -> list[dict]:
+        """While learning: render `url`, click the elements showing `texts` and report where each leads
+        ([{"text", "url", "canonical"}]) — for sites whose item cards are not links. Same rules as render()."""
+        if self.renderer is None or not is_public_url(url) or not self.allowed(url):
+            return []
+        self._wait(url)
+        res = self.renderer.render(url, click_texts=texts)
+        return list(res.opened) if res is not None else []
 
     # -- robots -------------------------------------------------------------
     def allowed(self, url: str) -> bool:

@@ -129,7 +129,8 @@ class Engine:
         items, stats = self._crawler(o.portal).crawl(seed, EVENT_SPEC, copts)
         self.last_crawl_stats.append({"source": seed, "pages": stats.pages, "by_method": stats.by_method,
                                       "llm_calls": stats.llm_calls, "recipes_learned": stats.recipes_learned,
-                                      "rendered": stats.rendered, "plan": stats.plan, "notes": stats.notes})
+                                      "rendered": stats.rendered, "plan": stats.plan, "notes": stats.notes,
+                                      "entry": stats.entry})
         return [item_to_event(i, o.portal) for i in items]
 
     # ---------------------------------------------------------------- pipeline

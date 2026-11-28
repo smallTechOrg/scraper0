@@ -46,6 +46,14 @@ SYNONYMS: dict[str, list[str]] = {
 }
 _TIME_KEYS = {"start": ["time", "start_time", "from_time", "starttime", "time_start"],
               "end": ["end_time", "to_time", "endtime", "time_end"]}
+_TIME_WORDS = {"start": {"start", "from", "begin", "open"}, "end": {"end", "to", "finish", "close", "until"}}
+
+
+def _key_words(key: str) -> list[str]:
+    """event_start_time / eventStartTime → ["event", "start", "time"]."""
+    return [w for w in re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key).lower().split("_") if w]
+
+
 _NOT_TEXT_SUFFIX = ("_id", "_ids", "_url", "_link", "_website", "_logo", "_count", "_type", "_slug")
 _DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _TIME_ONLY = re.compile(r"^\d{1,2}:\d{2}(:\d{2})?\s*([ap]\.?m\.?)?$", re.I)
@@ -137,9 +145,55 @@ def _fits(f: FieldSpec, spec: EntitySpec, values: list, base: str) -> float:
             continue
         if f.type in ("number",) and isinstance(v, bool):
             continue
+        if f.type in ("url", "image") and not _looks_like_url(v, f.type):
+            continue      # any string "coerces" to a URL; only real URLs, paths and image file names count
         if spec.coerce(f.name, v, base) not in (None, ""):
             ok += 1
     return ok / len(values)
+
+
+_URLISH = re.compile(r"^(https?:)?//\S+$|^/\S*$")
+_IMAGE_FILE = re.compile(r"\.(jpe?g|png|webp|gif|avif|svg)(\?|$)", re.I)
+_LEAF_NAME = ("name", "title", "label", "display_name", "displayname", "full_name")
+
+
+def _looks_like_url(v, ftype: str = "url") -> bool:
+    return isinstance(v, str) and bool(_URLISH.match(v.strip()) or (ftype == "image" and _IMAGE_FILE.search(v)))
+
+
+def _alias_rank(f: FieldSpec, path: str, aliases: list[str], compact: list[str], entity: str = "") -> int | None:
+    """How well a key path names a field, lower = better; None = not at all.
+    0…: the key is the field's name or a synonym ("venue", "startDate").
+    then: a top-level key containing one as a whole word ("event_link", "other_organizer_name").
+    then: an abbreviation of one, naming it ("org_name" for organisation).
+    then: a nested object or list member named like the field, read at its name ("organizer.name",
+          "eventorganizer.0.name")."""
+    seg = _seg(path)
+    n = len(aliases)
+    if "." in path and seg in _LEAF_NAME:
+        # "organizer.name" is the organiser's name, "event.title" the event's: the parent says whose it is
+        parents = [p.lower().replace("_", "") for p in path.split(".")[:-1] if not p.isdigit()]
+        if not parents or parents[-1].rstrip("s") == entity.replace("_", ""):
+            return aliases.index(seg) if seg in aliases else None      # "event.title": the entity's own
+        own = parents[-1] + seg.replace("_", "")
+        if own in compact:
+            return compact.index(own)
+        if f.type in ("text", "address") and any(len(a) >= 4 and a in parents[-1] for a in compact):
+            return n + 3
+        return None
+    if seg in aliases:
+        return aliases.index(seg)
+    if seg.replace("_", "") in compact:
+        return compact.index(seg.replace("_", ""))
+    toks = [t for t in seg.split("_") if t]
+    wordy = f.type in ("text", "address", "url", "image")
+    if wordy and "." not in path and not seg.endswith(_NOT_TEXT_SUFFIX[:2] if f.type in ("url", "image") else _NOT_TEXT_SUFFIX) \
+            and any(a in toks for a in aliases):
+        return n + 1
+    if f.type in ("text", "address") and "." not in path and len(toks) == 2 and toks[1] in _LEAF_NAME \
+            and len(toks[0]) >= 3 and any(a.startswith(toks[0]) for a in aliases):
+        return n + 2
+    return None
 
 
 def heuristic_mapping(spec: EntitySpec, items: list[dict], base: str = "") -> dict:
@@ -151,13 +205,8 @@ def heuristic_mapping(spec: EntitySpec, items: list[dict], base: str = "") -> di
         best: tuple | None = None
         ranked: list[tuple] = []
         for path, vals in samples.items():
-            seg = _seg(path)
-            if seg in aliases or seg.replace("_", "") in compact:
-                rank = aliases.index(seg) if seg in aliases else compact.index(seg.replace("_", ""))
-            elif f.type in ("text", "address") and "." not in path and not seg.endswith(_NOT_TEXT_SUFFIX) and \
-                    any(a in seg.split("_") for a in aliases):   # whole-word match on a top-level key
-                rank = len(aliases) + 1          # "other_organizer_name" for organisation
-            else:
+            rank = _alias_rank(f, path, aliases, compact, spec.name)
+            if rank is None:
                 continue
             fit = _fits(f, spec, vals, base)
             if fit < 0.6:
@@ -170,7 +219,9 @@ def heuristic_mapping(spec: EntitySpec, items: list[dict], base: str = "") -> di
             continue
         path = best[1]
         if f.type != "datetime" and len(ranked) > 1:   # keep fallbacks: image_url, else media_urls.0
-            mapping[f.name] = {"first_of": [p for _, p in sorted(ranked)[:3]]}
+            exact = [(k, p) for k, p in ranked if k[1] < len(aliases)]     # the field's own name or a synonym
+            keep = [p for _, p in sorted(exact or ranked)[:3]]             # looser matches only when none is exact
+            mapping[f.name] = {"first_of": keep} if len(keep) > 1 else keep[0]
             continue
         if f.type == "datetime":      # date and time in separate keys → join
             vals = [v for v in samples[path] if isinstance(v, str)]
@@ -178,7 +229,12 @@ def heuristic_mapping(spec: EntitySpec, items: list[dict], base: str = "") -> di
                 parent = path.rsplit(".", 1)[0] + "." if "." in path else ""
                 last = path.rsplit(".", 1)[-1]
                 sibling = [last.replace("date", "time")] if "date" in last else []      # event_from_date → event_from_time
-                for tk in sibling + _TIME_KEYS["end" if "end" in f.name else "start"]:
+                which = "end" if "end" in f.name else "start"
+                # any sibling naming a time of the same end of the event: event_start_time, startTime, time_from
+                words = _TIME_WORDS[which]
+                named = [k[len(parent):] for k in samples if k.startswith(parent) and "." not in k[len(parent):]
+                         and "time" in _key_words(k[len(parent):]) and words & set(_key_words(k[len(parent):]))]
+                for tk in sibling + _TIME_KEYS[which] + sorted(named):
                     tv = [v for v in samples.get(parent + tk, []) if isinstance(v, str)]
                     if tv and all(_TIME_ONLY.match(v.strip()) for v in tv):
                         mapping[f.name] = [path, parent + tk]
@@ -235,10 +291,23 @@ def apply_mapping(spec: EntitySpec, item: dict, mapping: dict, base: str) -> dic
             if val not in (None, ""):
                 out[fname] = val
             continue
-        if isinstance(path, dict):          # {"first_of": [...]} → first path with a value
-            path = next((p for p in path.get("first_of", []) if get_path(item, p) not in (None, "", [])), None)
-            if path is None:
+        if isinstance(path, dict):          # {"first_of": [...]} → first path (or template) with a value
+            chosen = None
+            for p in path.get("first_of", []):
+                if isinstance(p, dict) and "template" in p:
+                    filled = _link(p["template"], item, base)
+                    if filled:
+                        chosen = spec.coerce(fname, filled, base)
+                        break
+                elif get_path(item, p) not in (None, "", []):
+                    chosen = p
+                    break
+            if chosen is None:
                 continue
+            if not isinstance(chosen, str) or chosen not in path.get("first_of", []):
+                out[fname] = chosen
+                continue
+            path = chosen
         if isinstance(path, list):
             parts = [get_path(item, p) for p in path]
             raw = " ".join(str(p) for p in parts if p not in (None, "")) if parts and parts[0] not in (None, "") else None
@@ -349,3 +418,58 @@ def find_lookups(spec: EntitySpec, arr: list[dict], mapping: dict, api_url: str,
                 if len(vals) >= MIN_ITEMS and sum(v in ids for v in vals) / len(vals) >= 0.6:
                     return {target: {"key": k, "api_url": other_url, "items_path": path, "id": "id", "value": name_key}}
     return {}
+
+
+# ------------------------------------------------------------------ links and images carried by the items
+
+_LINK_WORDS = ("link", "url", "permalink", "href", "uri", "slug_url", "share")
+
+
+def item_link_field(items: list[dict], page_url: str) -> str | None:
+    """A key whose values are the items' own pages: a different same-site URL (or path) per item. Keys named like
+    a link come first. → dotted path, or None."""
+    host = (urlsplit(page_url).hostname or "").removeprefix("www.")
+    best: tuple | None = None
+    for path, vals in _samples(items).items():
+        if ".0." in f".{path}." or not all(_looks_like_url(v) for v in vals):
+            continue
+        full = [str(get_path(it, path)) for it in items[:SAMPLE] if isinstance(get_path(it, path), str)]
+        if len(full) < 0.8 * min(len(items), SAMPLE) or len(set(full)) < 0.9 * len(full):
+            continue                                        # missing on many items, or shared between them
+        hosts = {(urlsplit(urljoin(page_url, v)).hostname or "").removeprefix("www.") for v in full}
+        if hosts != {host}:
+            continue
+        if any(_IMAGE_FILE.search(urlsplit(v).path) for v in full[:5]):
+            continue
+        toks = _seg(path).split("_")
+        named = 0 if any(w in toks or _seg(path) == w for w in _LINK_WORDS) else 1
+        key = (named, path.count("."), path)
+        if best is None or key < best[0]:
+            best = (key, path)
+    return best[1] if best else None
+
+
+_PLACEHOLDER_NAME = re.compile(r"(^|[^a-z])(placeholder|no[-_ ]?image|noimage|no[-_ ]?photo|image[-_ ]?not[-_ ]?available|"
+                               r"default[-_ ]?(image|img|banner|thumb\w*|event|poster|cover)|dummy|blank|logo)([^a-z]|$)", re.I)
+PLACEHOLDER_SHARE = 0.6        # one image on this share of a run's items (≥ 5 items) is a stand-in, not a picture
+
+
+def placeholder_images(values: list) -> list[str]:
+    """Image URLs that are stand-ins: named like one, or the same URL on most of the items."""
+    vals = [v for v in values if isinstance(v, str) and v]
+    out = {v for v in vals if _PLACEHOLDER_NAME.search(urlsplit(v).path.rsplit("/", 1)[-1])}
+    if len(values) >= 5 and vals:
+        top = max(set(vals), key=vals.count)
+        if vals.count(top) >= PLACEHOLDER_SHARE * len(values) and vals.count(top) >= 3:
+            out.add(top)
+    return sorted(out)
+
+
+def drop_placeholder_images(items: list[dict], known: dict | None = None, field: str = "image") -> list[dict]:
+    """Treat stand-in images as no image: the ones noted in the plan while learning, and the ones this run shows."""
+    drop = set((known or {}).get(field) or []) | set(placeholder_images([i.get(field) for i in items]))
+    if drop:
+        for i in items:
+            if i.get(field) in drop:
+                i[field] = None
+    return items
