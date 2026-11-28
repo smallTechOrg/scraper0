@@ -23,6 +23,7 @@ import {
 import { api, type AiResultInfo, type ConnectorResult, type CrawlResult, type Job, type RefreshResult } from "@/lib/api";
 import { cellText, duration, formatDate, jobErrorText, usd } from "@/lib/format";
 import { isTerminal, useLiveJob, type LiveMode } from "@/lib/live-job";
+import { PlanRuns, type RunStats } from "@/components/recipe-view";
 
 function LiveIndicator({ mode }: { mode: LiveMode }) {
   const label = {
@@ -45,6 +46,11 @@ function asCrawlResult(job: Job): CrawlResult | null {
   const r = job.result as Partial<CrawlResult> | null;
   if (!r || typeof r !== "object" || !Array.isArray(r.items)) return null;
   return { ...r, items: r.items, stats: r.stats ?? {} };
+}
+
+function planRuns(job: Job): RunStats[] {
+  const r = job.result as { plan_runs?: RunStats[]; implementation_snapshot?: { check_run?: RunStats[] } } | null;
+  return r?.plan_runs ?? r?.implementation_snapshot?.check_run ?? [];
 }
 
 function refreshResult(job: Job): RefreshResult | null {
@@ -206,10 +212,19 @@ export default function JobDetailPage() {
           <Stat label="Pages" value={p.pages ?? 0} />
           <Stat label="Items" value={p.items ?? crawl?.items.length ?? 0} />
           <Stat label="AI calls" value={p.llm_calls ?? 0} />
-          <Stat label="Layouts learned" value={p.recipes_learned ?? 0} />
+          <Stat label="Layouts learned" value={p.recipes_learned ?? 0} hint="while learning" />
         </div>
 
         <AiErrors errors={ai?.errors} />
+
+        {planRuns(job).length > 0 && (
+          <Card>
+            <CardHeader title="Recipe run" description="The path each recipe took: entry, fallbacks, retries, failed checks and AI per step." />
+            <div className="px-4 py-4 sm:px-5">
+              <PlanRuns runs={planRuns(job)} title="" />
+            </div>
+          </Card>
+        )}
 
         <Card>
           <CardHeader title="Progress" />
