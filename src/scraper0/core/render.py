@@ -88,8 +88,9 @@ def _site(host: str) -> str:
 
 
 class Renderer:
-    def __init__(self, headless: bool = True):
+    def __init__(self, headless: bool = True, allow=None):
         self.headless = headless
+        self._allow = allow or is_public_url    # SSRF guard for every request a page makes (tests inject one)
         self._q: queue.Queue = queue.Queue()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -99,7 +100,7 @@ class Renderer:
     # ---------------------------------------------------------------- public
     def render(self, url: str, timeout_s: float = 75) -> RenderResult | None:
         """Never raises. None when rendering is unavailable, blocked or failed."""
-        if self.unavailable or not is_public_url(url):
+        if self.unavailable or not self._allow(url):
             return None
         box: dict = {}
         done = threading.Event()
@@ -109,6 +110,25 @@ class Renderer:
             log.warning("render_timeout", url=url)
             return None
         return box.get("result")
+
+    def session(self, fn, timeout_s: float = 300):
+        """Run `fn(browser, allowed)` on the browser thread and return its result (action plans: logins, forms,
+        lookups — core/action_plans.py). `allowed(url)` is the SSRF guard the session must apply to every request.
+        Raises what `fn` raises; RuntimeError when the browser is unavailable; TimeoutError when `fn` is still
+        running after timeout_s (it keeps running: the caller decides what an unfinished session means)."""
+        if self.unavailable:
+            raise RuntimeError(f"browser unavailable: {self.unavailable}")
+        box: dict = {}
+        done = threading.Event()
+        self._q.put((fn, box, done))
+        self._ensure_thread()
+        if not done.wait(timeout_s):
+            raise TimeoutError(f"the browser session did not finish within {timeout_s:g}s")
+        if "error" in box:
+            raise box["error"]
+        if "result" not in box:
+            raise RuntimeError(f"browser unavailable: {self.unavailable or 'the session did not run'}")
+        return box["result"]
 
     # ---------------------------------------------------------------- worker
     def _ensure_thread(self):
@@ -137,9 +157,15 @@ class Renderer:
                         except queue.Empty:
                             return
                         try:
-                            box["result"] = self._render_one(browser, url)
+                            if callable(url):                       # a session (see session())
+                                box["result"] = url(browser, self._allowed)
+                            else:
+                                box["result"] = self._render_one(browser, url)
                         except Exception as e:  # noqa: BLE001
-                            log.warning("render_failed", url=url, error=str(e)[:300])
+                            if callable(url):
+                                box["error"] = e
+                            else:
+                                log.warning("render_failed", url=url, error=str(e)[:300])
                         finally:
                             done.set()
                 finally:
@@ -160,7 +186,7 @@ class Renderer:
     def _allowed(self, url: str) -> bool:
         host = urlsplit(url).netloc
         if host not in self._host_ok:
-            self._host_ok[host] = is_public_url(url)     # SSRF guard for every sub-request, cached per host
+            self._host_ok[host] = self._allow(url)       # SSRF guard for every sub-request, cached per host
         return self._host_ok[host]
 
     def _render_one(self, browser, url: str) -> RenderResult:

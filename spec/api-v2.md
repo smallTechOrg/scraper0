@@ -185,3 +185,29 @@ Idempotency-Key: hashtaglocal-issue-1234          // optional; default = sha256(
 - **Extra fields:** `Version` also has `job_id`; `Site.created_by_tenant` is the tenant slug (null for seeded sites);
   versions are listed newest first; lookups run as a `connector` job (visible in `GET /v1/jobs/{id}`). Only list
   refreshes count towards `consecutive_failures` / broken (lookups and writes fail for caller reasons too).
+
+## Plan actions (lookups and writes as data)
+
+An action can run from an **action plan** ([recipes.md](recipes.md), "Action plans") instead of a code connector.
+`Action.implementation` is then `"plan"`.
+
+```
+POST /v2/sites/{site_id}/actions  (tenant admin)
+     {"name": "track_issue", "plan": {…action plan…}, "entity": "issue_status"}     // kind and mode come from the plan
+     → 201 {"data": Action}      draft; version 1 (draft) holds the plan           | 422 invalid_input (plan: …)
+POST /v2/sites/{site_id}/actions/{name}/versions  (tenant admin)   {"plan": {…}}
+     → 201 {"data": Version}     a new draft version (an edited or repaired plan)   | 422 if the mode changes
+POST …/versions/{n}/lock        as for any action; the action's input and output schema follow the locked plan
+```
+
+- **Calls are unchanged:** `…/read` with `{"input", "auth"}` for a lookup, `…/write` with `Idempotency-Key` for a
+  write, and the same responses and error codes.
+- **Input is checked against the plan first.** A bad input is 422 `invalid_input`, and nothing reaches the site.
+- **Writes:** a failure before the plan's commit step is 422 `action_failed`; from the commit step on it is 409
+  `outcome_unknown`.
+- **Verification:** when the plan has `verify`, the write job's result has `write.verified` and `write.verify`
+  (`GET /v1/jobs/{job_id}`). The 200 response itself is unchanged.
+- **Jobs:** a plan lookup runs as a `site_lookup` job; its result has `data` and `plan_run`.
+- **Seeded drafts:** `smartoneblr-com` has `track_issue_plan` and `report_issue_plan` as draft plan actions next to
+  the locked code actions. They are not callable until an admin locks them.
+

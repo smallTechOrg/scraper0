@@ -1,0 +1,123 @@
+{
+  "plan_version": 1,
+  "kind": "action",
+  "mode": "lookup",
+  "name": "BBMP Sahaya 2.0: complaint status",
+  "inputs": {
+    "tracking_id": {
+      "type": "string",
+      "required": true,
+      "coerce": true,
+      "pattern": "[A-Za-z0-9-]+",
+      "example": "21025835",
+      "description": "the complaint number from the acknowledgement"
+    }
+  },
+  "steps": [
+    {
+      "id": "open",
+      "type": "browser",
+      "do": "goto",
+      "url": "https://www.smartoneblr.com/WssBBMPComplaintRequestDetails.htm",
+      "note": "Looking up complaint"
+    },
+    {
+      "id": "number",
+      "type": "browser",
+      "do": "fill",
+      "target": [
+        {
+          "css": "#complainantNo"
+        },
+        {
+          "label": "Complaint No"
+        },
+        {
+          "placeholder": "Complaint"
+        }
+      ],
+      "value": "{input.tracking_id}"
+    },
+    {
+      "id": "search",
+      "type": "any_of",
+      "alternatives": [
+        {
+          "type": "browser",
+          "do": "click",
+          "target": [
+            {
+              "css": "button:has-text('search')"
+            },
+            {
+              "role": "button",
+              "name": "Search"
+            }
+          ],
+          "timeout_ms": 10000
+        },
+        {
+          "type": "browser",
+          "do": "press",
+          "key": "Enter",
+          "target": {
+            "css": "#complainantNo"
+          }
+        }
+      ]
+    },
+    {
+      "id": "result",
+      "type": "browser",
+      "do": "wait_for",
+      "target": {
+        "css": "div.panel.panel-primary:nth-of-type(1) div.col-sm-6:has-text('{input.tracking_id}')"
+      },
+      "message": "Complaint details not found, or the portal timed out. Invalid ID?"
+    },
+    {
+      "id": "staff",
+      "type": "extract",
+      "labels": {
+        "container": "div.panel.panel-primary",
+        "index": 1,
+        "min_containers": 2,
+        "group": "div.form-group",
+        "label": "label",
+        "value_tag": "div",
+        "missing_message": "Complaint details not found. Invalid ID?"
+      }
+    }
+  ],
+  "output": {
+    "status": {
+      "from": "vars.staff.Grievance Status",
+      "required": true,
+      "message": "Complaint status not found on the portal page",
+      "map": {
+        "registered": "OPEN",
+        "closed": "CLOSED"
+      },
+      "unknown_message": "Unknown grievance status: {value}"
+    },
+    "meta_data": {
+      "object": {
+        "remarks": {
+          "from": "vars.staff.Staff Remarks"
+        },
+        "staff_name": {
+          "first_of": [
+            "vars.staff.Staff Name",
+            "vars.staff.Assigned To",
+            "vars.staff.Handler",
+            "vars.staff.Assigned Officer"
+          ],
+          "omit_if_missing": true
+        },
+        "mobile_number": {
+          "from": "vars.staff.Contact Details"
+        }
+      }
+    }
+  }
+}

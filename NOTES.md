@@ -56,3 +56,19 @@ cd frontend && npx tsc --noEmit && npm run lint && npm run build
 
 `playwright install chromium` may remove older Chromium builds from `~/Library/Caches/ms-playwright`, which other
 repos on the same machine may need.
+
+## Action plans: browser steps, sessions, captcha, writes (2026-11-28)
+
+- `core/action_plans.py` runs lookups and writes from data in a browser: `browser`, `session`, `captcha`, `extract`,
+  `expect`, `any_of`, with `commit` and `verify` for writes. List plans (`core/plans.py`) are unchanged; `plans.validate`
+  routes `"kind": "action"` plans to the new module.
+- `Renderer.session(fn)` runs a whole browser session on the existing browser thread, with the same SSRF guard.
+  Sessions are serial with renders: a long write holds the browser while it runs.
+- The BBMP connector is translated into two plans (`site_plans/smartoneblr-com/`), seeded as draft actions
+  `track_issue_plan` and `report_issue_plan`. The code connectors stay until the plans are locked and proven.
+- Checked against the real portal, read-only: the track plan returns the same output as the code connector for a
+  real complaint number, and the report plan's login-modal targets all match. **The report plan has never been run
+  past the login modal on the real portal** (it files real complaints, and there are no credentials here).
+- The captcha solver still lives in `connectors/bbmp/captcha.py`; move it to `core/` when the connector goes.
+- Browser tests are marked `browser` (run with `uv run pytest -m browser`); they use `tests/fake_portal.py`.
+

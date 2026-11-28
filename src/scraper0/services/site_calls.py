@@ -381,6 +381,15 @@ def read_list(tenant_id: str, site_id: str, name: str, body: dict) -> dict:
 
 # ------------------------------------------------------------------ read: lookup (input → output)
 
+def _check_plan_input(plan: dict, inp: dict, auth: dict | None) -> None:
+    from scraper0.core import action_plans
+    from scraper0.core.plans import PlanError
+    try:
+        action_plans.check_inputs(plan, inp, auth)
+    except PlanError as e:
+        raise SiteError(422, "invalid_input", str(e)) from None
+
+
 def read_lookup(tenant_id: str, site_id: str, name: str, body: dict) -> tuple[int, dict]:
     timeout = _num(body.get("timeout_s"), "timeout_s", DEFAULT_READ_TIMEOUT_S, 0, MAX_READ_TIMEOUT_S)
     inp, auth = body.get("input"), body.get("auth")
@@ -393,10 +402,17 @@ def read_lookup(tenant_id: str, site_id: str, name: str, body: dict) -> tuple[in
         if a.mode != "lookup":
             raise SiteError(422, "invalid_input", f"{name} is not a lookup action")
         version, conn, conn_action = v.version, a.connector, a.connector_action
-    job = {"connector": conn, "action": conn_action, "data": inp, "site_id": site_id, "site_action": name}
+        plan = (v.implementation_snapshot or {}).get("plan") if a.implementation == "plan" else None
+    if plan is not None:                   # an action plan: checked before anything touches the site
+        _check_plan_input(plan, inp, auth)
+        job = {"site_id": site_id, "action": name, "version": version, "data": inp}
+        kind = "site_lookup"
+    else:
+        job = {"connector": conn, "action": conn_action, "data": inp, "site_id": site_id, "site_action": name}
+        kind = "connector"
     if auth:
         job["auth"] = auth
-    job_id = runner.submit(tenant_id, "connector", job)
+    job_id = runner.submit(tenant_id, kind, job)
     runner.dispatch(job_id)
     st = wait_job(job_id, timeout)
     if st is None:
@@ -467,7 +483,10 @@ def write(tenant_id: str, site_id: str, name: str, body: dict, idem_key: str | N
         a, v = sites_svc.get_locked(s, site_id, name)
         if a.kind != "write":
             raise SiteError(422, "invalid_input", f"{name} is a read action: POST …/{name}/read")
-        conn, conn_action = a.connector, a.connector_action
+        conn, conn_action, version = a.connector, a.connector_action, v.version
+        plan = (v.implementation_snapshot or {}).get("plan") if a.implementation == "plan" else None
+    if plan is not None:
+        _check_plan_input(plan, inp, auth)
     key = idem_key or default_key(tenant_id, site_id, name, inp)
     job_id = record_id = replay = None
     for attempt in range(2):
@@ -485,7 +504,7 @@ def write(tenant_id: str, site_id: str, name: str, body: dict, idem_key: str | N
                     s.add(rec)
                     s.flush()
                 job = {"site_id": site_id, "site_action": name, "connector": conn, "connector_action": conn_action,
-                       "data": inp, "write_record_id": rec.id, "idempotency_key": key}
+                       "version": version, "data": inp, "write_record_id": rec.id, "idempotency_key": key}
                 if auth:
                     job["auth"] = auth
                 j = runner.add_job(s, tenant_id, "site_write", job)

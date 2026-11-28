@@ -38,7 +38,7 @@ def run(job_id: str, tenant_id: str, kind: str, inp: dict, source_id: str | None
     try:
         if kind == "connector":
             out = _connector(job_id, tenant_id, inp, source_id, rep, ai)
-        elif kind in ("site_refresh", "site_learn", "site_write"):
+        elif kind in ("site_refresh", "site_learn", "site_write", "site_lookup"):
             from scraper0.services import site_runs
             out = site_runs.run(job_id, tenant_id, kind, inp, rep, ai)
         else:

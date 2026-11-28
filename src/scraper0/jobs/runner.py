@@ -27,7 +27,7 @@ log = structlog.get_logger(__name__)
 TERMINAL = {"succeeded", "failed", "cancelled"}
 # Every scrape goes through an onboarded site + locked action (v2): site_* jobs. "connector" runs a code
 # connector for a v2 lookup that outlives its request; nothing submits it from outside.
-KINDS = {"connector", "site_refresh", "site_learn", "site_write"}
+KINDS = {"connector", "site_refresh", "site_learn", "site_write", "site_lookup"}
 STALE_AFTER = timedelta(minutes=10)
 
 _pool: ThreadPoolExecutor | None = None
@@ -44,7 +44,7 @@ def job_public(j: Job, include_result: bool = True) -> dict:
     inp = {k: v for k, v in (j.input or {}).items() if k not in ("auth_enc",)}
     if (j.input or {}).get("auth_enc"):
         inp["auth"] = "***"
-    site_action = inp.get("action") if j.kind.startswith("site_") else inp.get("site_action")
+    site_action = inp.get("site_action") or (inp.get("action") if j.kind.startswith("site_") else None)
     d = {"id": j.id, "kind": j.kind, "status": j.status, "input": inp, "error": j.error, "progress": j.progress or {},
          "site_id": inp.get("site_id"), "action": site_action,
          "source_id": j.source_id, "created_at": j.created_at.isoformat() if j.created_at else None,
